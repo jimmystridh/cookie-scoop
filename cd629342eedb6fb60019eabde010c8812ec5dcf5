@@ -1,0 +1,23 @@
+crates/cookie-scoop/src/providers/safari.rs
+  2c919943d41b1271 3-6,8,11,124,161,198,263,272,287
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.42",
+  "base_commit_sha": "cd629342eedb6fb60019eabde010c8812ec5dcf5",
+  "prompts": {
+    "2c919943d41b1271": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c2ef445c-7910-4d4d-ae8e-601fad87bff1",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Jimmy Stridh <jimmystridh@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 15,
+      "total_deletions": 4,
+      "accepted_lines": 12,
+      "overriden_lines": 0
+    }
+  }
+}
