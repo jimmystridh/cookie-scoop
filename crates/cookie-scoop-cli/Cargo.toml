@@ -15,7 +15,7 @@ name = "cookie-scoop"
 path = "src/main.rs"
 
 [dependencies]
-cookie-scoop = { path = "../cookie-scoop" }
+cookie-scoop = { version = "0.1.0", path = "../cookie-scoop" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
