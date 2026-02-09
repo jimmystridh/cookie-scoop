@@ -1,9 +1,14 @@
 use std::collections::HashSet;
 
-use crate::types::{BrowserName, Cookie, CookieSource, GetCookiesResult};
+use crate::types::GetCookiesResult;
+#[cfg(any(target_os = "macos", test))]
+use crate::types::{BrowserName, Cookie, CookieSource};
+#[cfg(any(target_os = "macos", test))]
 use crate::util::host_match::host_matches_cookie_domain;
+#[cfg(any(target_os = "macos", test))]
 use url::Url;
 
+#[cfg(any(target_os = "macos", test))]
 const MAC_EPOCH_DELTA_SECONDS: i64 = 978_307_200;
 
 pub async fn get_cookies_from_safari(
@@ -16,10 +21,10 @@ pub async fn get_cookies_from_safari(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (&options, origins, allowlist_names);
-        return GetCookiesResult {
+        GetCookiesResult {
             cookies: vec![],
             warnings,
-        };
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -116,6 +121,7 @@ fn resolve_safari_binary_cookies_path() -> Option<String> {
     None
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn decode_binary_cookies(buffer: &[u8]) -> Vec<Cookie> {
     if buffer.len() < 8 {
         return vec![];
@@ -152,6 +158,7 @@ fn decode_binary_cookies(buffer: &[u8]) -> Vec<Cookie> {
     cookies
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn decode_page(page: &[u8]) -> Vec<Cookie> {
     if page.len() < 16 {
         return vec![];
@@ -188,6 +195,7 @@ fn decode_page(page: &[u8]) -> Vec<Cookie> {
     cookies
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn decode_cookie(buf: &[u8]) -> Option<Cookie> {
     if buf.len() < 48 {
         return None;
@@ -252,6 +260,7 @@ fn decode_cookie(buf: &[u8]) -> Option<Cookie> {
     Some(cookie)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn read_double_le(buf: &[u8], offset: usize) -> f64 {
     if offset + 8 > buf.len() {
         return 0.0;
@@ -260,6 +269,7 @@ fn read_double_le(buf: &[u8], offset: usize) -> f64 {
     f64::from_le_bytes(bytes)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn read_c_string(buf: &[u8], offset: usize, end: usize) -> Option<String> {
     if offset == 0 || offset >= end || offset >= buf.len() {
         return None;
@@ -274,6 +284,7 @@ fn read_c_string(buf: &[u8], offset: usize, end: usize) -> Option<String> {
     String::from_utf8(buf[offset..cursor].to_vec()).ok()
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn safe_hostname_from_url(raw: &str) -> Option<String> {
     let url_str = if raw.contains("://") {
         raw.to_string()
