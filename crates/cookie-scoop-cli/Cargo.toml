@@ -1,0 +1,21 @@
+[package]
+name = "cookie-scoop-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI tool for extracting browser cookies from Chrome, Edge, Firefox, and Safari"
+license = "MIT"
+repository = "https://github.com/jimmystridh/cookie-scoop"
+homepage = "https://github.com/jimmystridh/cookie-scoop"
+readme = "../../README.md"
+keywords = ["cookies", "browser", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "cookie-scoop"
+path = "src/main.rs"
+
+[dependencies]
+cookie-scoop = { path = "../cookie-scoop" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

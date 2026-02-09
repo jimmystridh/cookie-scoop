@@ -1,0 +1,3 @@
+[workspace]
+resolver = "2"
+members = ["crates/cookie-scoop", "crates/cookie-scoop-cli", "crates/test-jira"]

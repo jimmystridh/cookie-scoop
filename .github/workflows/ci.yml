@@ -1,0 +1,206 @@
+name: CI and Release
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --workspace
+      - name: Build docs
+        run: cargo doc --no-deps --workspace
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: cookie-scoop
+            asset_name: cookie-scoop-linux-amd64
+            use_cross: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            artifact_name: cookie-scoop
+            asset_name: cookie-scoop-linux-arm64
+            use_cross: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: cookie-scoop.exe
+            asset_name: cookie-scoop-windows-amd64
+            use_cross: false
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact_name: cookie-scoop.exe
+            asset_name: cookie-scoop-windows-arm64
+            use_cross: false
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: cookie-scoop
+            asset_name: cookie-scoop-macos-amd64
+            use_cross: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: cookie-scoop
+            asset_name: cookie-scoop-macos-arm64
+            use_cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Cross
+        if: matrix.use_cross == true
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - name: Build
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --release --target ${{ matrix.target }} -p cookie-scoop-cli
+          else
+            cargo build --release --target ${{ matrix.target }} -p cookie-scoop-cli
+          fi
+      - name: Build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ('${{ matrix.use_cross }}' -eq 'true') {
+            cross build --release --target '${{ matrix.target }}' -p cookie-scoop-cli
+          } else {
+            cargo build --release --target '${{ matrix.target }}' -p cookie-scoop-cli
+          }
+      - name: Package binary
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            7z a ../../../${{ matrix.asset_name }}.zip ${{ matrix.artifact_name }}
+            echo "ASSET_PATH=${{ matrix.asset_name }}.zip" >> $GITHUB_ENV
+          else
+            tar -czf ../../../${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
+            echo "ASSET_PATH=${{ matrix.asset_name }}.tar.gz" >> $GITHUB_ENV
+          fi
+          cd ../../../
+      - name: Upload Release Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ env.ASSET_PATH }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish to crates.io
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Check if library version changed
+        id: lib_version
+        run: |
+          CURRENT_VERSION=$(grep '^version = ' crates/cookie-scoop/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "current_version=${CURRENT_VERSION}" >> $GITHUB_OUTPUT
+
+          PUBLISHED=$(cargo search cookie-scoop --limit 1 | sed 's/.*= "\(.*\)".*/\1/' | head -1)
+          if [ "$PUBLISHED" = "$CURRENT_VERSION" ]; then
+            echo "Version v${CURRENT_VERSION} already on crates.io"
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+          else
+            echo "New version v${CURRENT_VERSION} (crates.io has v${PUBLISHED})"
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+          fi
+      - name: Publish cookie-scoop to crates.io
+        if: steps.lib_version.outputs.should_publish == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p cookie-scoop
+      - name: Check if CLI version changed
+        id: cli_version
+        run: |
+          CURRENT_VERSION=$(grep '^version = ' crates/cookie-scoop-cli/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "current_version=${CURRENT_VERSION}" >> $GITHUB_OUTPUT
+
+          PUBLISHED=$(cargo search cookie-scoop-cli --limit 1 | sed 's/.*= "\(.*\)".*/\1/' | head -1)
+          if [ "$PUBLISHED" = "$CURRENT_VERSION" ]; then
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+          else
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+          fi
+      - name: Publish cookie-scoop-cli to crates.io
+        if: steps.cli_version.outputs.should_publish == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p cookie-scoop-cli
+
+  release:
+    name: Create Release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, build, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check if version changed
+        id: version_check
+        run: |
+          CURRENT_VERSION=$(grep '^version = ' crates/cookie-scoop/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "current_version=${CURRENT_VERSION}" >> $GITHUB_OUTPUT
+
+          if git rev-parse "v${CURRENT_VERSION}" >/dev/null 2>&1; then
+            echo "Version v${CURRENT_VERSION} already released"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          else
+            echo "New version v${CURRENT_VERSION} detected"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          fi
+      - name: Download all release assets
+        if: steps.version_check.outputs.should_release == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        if: steps.version_check.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version_check.outputs.current_version }}
+          name: v${{ steps.version_check.outputs.current_version }}
+          files: artifacts/*/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

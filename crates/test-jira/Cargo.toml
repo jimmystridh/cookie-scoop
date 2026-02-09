@@ -1,0 +1,10 @@
+[package]
+name = "test-jira"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cookie-scoop = { path = "../cookie-scoop" }
+reqwest = { version = "0.12", features = ["cookies"] }
+tokio = { version = "1", features = ["full"] }
