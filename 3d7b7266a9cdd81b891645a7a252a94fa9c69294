@@ -1,0 +1,23 @@
+crates/cookie-scoop-cli/Cargo.toml
+  2c919943d41b1271 18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.42",
+  "base_commit_sha": "3d7b7266a9cdd81b891645a7a252a94fa9c69294",
+  "prompts": {
+    "2c919943d41b1271": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c2ef445c-7910-4d4d-ae8e-601fad87bff1",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Jimmy Stridh <jimmystridh@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  }
+}
