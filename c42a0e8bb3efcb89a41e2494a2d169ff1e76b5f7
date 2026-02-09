@@ -1,0 +1,23 @@
+crates/cookie-scoop/src/providers/chromium/paths.rs
+  2c919943d41b1271 1-2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.42",
+  "base_commit_sha": "c42a0e8bb3efcb89a41e2494a2d169ff1e76b5f7",
+  "prompts": {
+    "2c919943d41b1271": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c2ef445c-7910-4d4d-ae8e-601fad87bff1",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Jimmy Stridh <jimmystridh@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 4,
+      "total_deletions": 2,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    }
+  }
+}
