@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use crate::util::exec::exec_capture;
 
 #[cfg(target_os = "macos")]

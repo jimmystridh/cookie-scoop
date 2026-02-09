@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::types::GetCookiesResult;
 #[cfg(any(target_os = "macos", test))]
 use crate::types::{BrowserName, Cookie, CookieSource};
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 use crate::util::host_match::host_matches_cookie_domain;
 #[cfg(any(target_os = "macos", test))]
 use url::Url;
@@ -16,19 +16,18 @@ pub async fn get_cookies_from_safari(
     origins: &[String],
     allowlist_names: Option<&HashSet<String>>,
 ) -> GetCookiesResult {
-    let mut warnings = Vec::new();
-
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (&options, origins, allowlist_names);
         GetCookiesResult {
             cookies: vec![],
-            warnings,
+            warnings: vec![],
         }
     }
 
     #[cfg(target_os = "macos")]
     {
+        let mut warnings = Vec::new();
         let cookie_file = options.file.or_else(resolve_safari_binary_cookies_path);
         let cookie_file = match cookie_file {
             Some(f) => f,
