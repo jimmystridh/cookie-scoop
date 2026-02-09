@@ -12,6 +12,7 @@ This is a Rust reimplementation of the concepts from [@steipete/sweet-cookie](ht
 - **Inline cookies** — accepts JSON, base64, or file-based cookie payloads for environments where browser DB access isn't possible
 - **Zero native dependencies** — SQLite is bundled via `rusqlite`, OS integration uses platform CLI tools (`security`, `secret-tool`, `kwallet-query`, PowerShell)
 - **Async** — built on tokio with `spawn_blocking` for SQLite and `tokio::process` for OS commands
+- **Never panics** — `get_cookies()` returns `GetCookiesResult` (not `Result`), accumulating issues in a `warnings` vec. Partial results are always returned.
 
 ## Install
 
@@ -32,7 +33,10 @@ cargo install cookie-scoop-cli
 ## Library usage
 
 ```rust
-use cookie_scoop::{get_cookies, to_cookie_header, GetCookiesOptions, CookieHeaderOptions};
+use cookie_scoop::{
+    get_cookies, to_cookie_header,
+    BrowserName, GetCookiesOptions, CookieHeaderOptions,
+};
 
 #[tokio::main]
 async fn main() {
@@ -53,6 +57,8 @@ async fn main() {
 
 ### Multiple origins
 
+Useful for sites with SSO/OAuth across subdomains:
+
 ```rust
 let result = get_cookies(
     GetCookiesOptions::new("https://app.example.com")
@@ -64,17 +70,31 @@ let result = get_cookies(
 ).await;
 ```
 
+### Merge vs first mode
+
+`merge` (default) combines cookies from all requested browsers. `first` stops after the first browser that returns any cookies.
+
+```rust
+let result = get_cookies(
+    GetCookiesOptions::new("https://example.com")
+        .browsers(vec![BrowserName::Chrome, BrowserName::Firefox])
+        .mode(CookieMode::First)
+).await;
+```
+
 ### Specific profile
 
 ```rust
 let result = get_cookies(
     GetCookiesOptions::new("https://example.com")
         .browsers(vec![BrowserName::Chrome])
-        .chrome_profile("Profile 1")
+        .chrome_profile("Profile 1") // name or full path to Cookies DB
 ).await;
 ```
 
 ### Inline cookies
+
+Works on any OS/runtime — no browser DB access required:
 
 ```rust
 let result = get_cookies(
@@ -83,10 +103,15 @@ let result = get_cookies(
 ).await;
 ```
 
+Also supports `inline_cookies_base64()` and `inline_cookies_file()`.
+
 ## CLI usage
 
 ```bash
-# JSON output
+# JSON output (all browsers, merge mode)
+cookie-scoop --url https://example.com
+
+# Specific browsers
 cookie-scoop --url https://example.com --browsers chrome,firefox
 
 # Cookie header string
@@ -97,6 +122,12 @@ cookie-scoop --url https://example.com --browsers chrome --chrome-profile "Profi
 
 # Filter by cookie name
 cookie-scoop --url https://example.com --names session,csrf
+
+# Include expired cookies
+cookie-scoop --url https://example.com --include-expired
+
+# First-match mode
+cookie-scoop --url https://example.com --mode first
 ```
 
 ## Supported browsers and platforms
@@ -116,9 +147,16 @@ Safari requires Full Disk Access on macOS.
 
 | Platform | Method |
 |----------|--------|
-| macOS    | Reads the safe storage password from Keychain via `security find-generic-password`, derives a key with PBKDF2-SHA1, decrypts with AES-128-CBC |
-| Linux    | Reads the safe storage password from GNOME Keyring (`secret-tool`) or KDE Wallet (`kwallet-query`), derives a key with PBKDF2-SHA1, decrypts with AES-128-CBC |
+| macOS    | Reads the safe storage password from Keychain via `security find-generic-password`, derives a key with PBKDF2-SHA1 (1003 iterations), decrypts with AES-128-CBC |
+| Linux    | Reads the safe storage password from GNOME Keyring (`secret-tool`) or KDE Wallet (`kwallet-query`), derives a key with PBKDF2-SHA1 (1 iteration), decrypts with AES-128-CBC. Falls back to the hardcoded `peanuts` password when using `basic` backend. |
 | Windows  | Reads the encrypted master key from Chrome's `Local State` JSON, decrypts it with DPAPI via PowerShell, then decrypts cookies with AES-256-GCM |
+
+### Implementation notes
+
+- **Cookie DB copying** — the Chromium/Firefox SQLite databases are copied to a temp directory (along with `-wal` and `-shm` sidecars) before reading, avoiding locks from running browsers. Temp files are cleaned up automatically via `tempfile::TempDir` RAII.
+- **Chromium meta version** — the `meta` table's `version` column is stored as TEXT in modern Chrome. cookie-scoop reads it as a string and parses to integer, correctly handling the hash-prefix stripping introduced in version 24+.
+- **GNOME keyring v2 schema** — modern Chrome stores the safe storage password under the `application=chrome` attribute rather than the legacy `service`/`account` attributes. cookie-scoop tries the v2 schema first, falling back to v1.
+- **Cookie deduplication** — cookies are deduped by `name|domain|path` key, keeping the first occurrence. This prevents duplicates when merge mode combines results from multiple browsers.
 
 ## Environment variables
 
