@@ -1,6 +1,6 @@
 [package]
 name = "cookie-scoop-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "CLI tool for extracting browser cookies from Chrome, Edge, Firefox, and Safari"
 license = "MIT"
@@ -15,7 +15,7 @@ name = "cookie-scoop"
 path = "src/main.rs"
 
 [dependencies]
-cookie-scoop = { version = "0.1.0", path = "../cookie-scoop" }
+cookie-scoop = { version = "0.1.1", path = "../cookie-scoop" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

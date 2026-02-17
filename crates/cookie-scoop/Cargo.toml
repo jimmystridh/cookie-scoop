@@ -1,6 +1,6 @@
 [package]
 name = "cookie-scoop"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Extract browser cookies from Chrome, Edge, Firefox, and Safari. Reads cookie databases directly with decryption support for macOS Keychain, Linux keyring, and Windows DPAPI."
 license = "MIT"
