@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use crate::providers::chromium::{
     get_cookies_from_chromium, ChromiumBrowser, ChromiumOptions, CHROME, EDGE, HELIUM,
 };
-use crate::providers::firefox::{get_cookies_from_firefox, FirefoxOptions};
+use crate::providers::firefox::{
+    get_cookies_from_firefox, FirefoxBrowser, FirefoxOptions, FIREFOX, ZEN,
+};
 use crate::providers::inline::{get_cookies_from_inline, InlineSource};
 use crate::providers::safari::{get_cookies_from_safari, SafariOptions};
 use crate::types::{
@@ -16,6 +18,7 @@ const DEFAULT_BROWSERS: &[BrowserName] = &[
     BrowserName::Chrome,
     BrowserName::Safari,
     BrowserName::Firefox,
+    BrowserName::Zen,
 ];
 
 pub async fn get_cookies(options: GetCookiesOptions) -> GetCookiesResult {
@@ -81,15 +84,22 @@ pub async fn get_cookies(options: GetCookiesOptions) -> GetCookiesResult {
                 )
                 .await
             }
-            BrowserName::Firefox => {
-                get_cookies_from_firefox(
-                    FirefoxOptions {
-                        profile: resolve_profile(
-                            &options,
-                            BrowserName::Firefox,
-                            false,
-                            &["SWEET_COOKIE_FIREFOX_PROFILE"],
+            BrowserName::Firefox | BrowserName::Zen => {
+                let (browser, use_generic_profile, envs): (FirefoxBrowser, bool, &[&str]) =
+                    match browser {
+                        BrowserName::Firefox => (FIREFOX, false, &["SWEET_COOKIE_FIREFOX_PROFILE"]),
+                        BrowserName::Zen => (
+                            ZEN,
+                            true,
+                            &["SWEET_COOKIE_ZEN_PROFILE", "SWEET_COOKIE_FIREFOX_PROFILE"],
                         ),
+                        _ => unreachable!(),
+                    };
+
+                get_cookies_from_firefox(
+                    browser,
+                    FirefoxOptions {
+                        profile: resolve_profile(&options, browser.name, use_generic_profile, envs),
                         include_expired: options.include_expired,
                     },
                     &origins,

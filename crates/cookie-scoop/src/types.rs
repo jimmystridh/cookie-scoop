@@ -9,6 +9,7 @@ pub enum BrowserName {
     Firefox,
     Helium,
     Safari,
+    Zen,
 }
 
 impl BrowserName {
@@ -19,6 +20,7 @@ impl BrowserName {
             "firefox" => Some(Self::Firefox),
             "helium" | "helium-browser" | "helium_browser" => Some(Self::Helium),
             "safari" => Some(Self::Safari),
+            "zen" | "zen-browser" | "zen_browser" => Some(Self::Zen),
             _ => None,
         }
     }
@@ -32,6 +34,7 @@ impl std::fmt::Display for BrowserName {
             Self::Firefox => write!(f, "firefox"),
             Self::Helium => write!(f, "helium"),
             Self::Safari => write!(f, "safari"),
+            Self::Zen => write!(f, "zen"),
         }
     }
 }

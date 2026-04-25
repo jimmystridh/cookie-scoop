@@ -6,14 +6,14 @@ use cookie_scoop::{
 #[derive(Parser)]
 #[command(
     name = "cookie-scoop",
-    about = "Extract browser cookies from Chrome, Edge, Firefox, Helium, and Safari"
+    about = "Extract browser cookies from Chrome, Edge, Firefox, Helium, Safari, and Zen"
 )]
 struct Cli {
     /// URL to extract cookies for (must include protocol)
     #[arg(long)]
     url: String,
 
-    /// Browser backends to try (comma-separated: chrome,edge,firefox,helium,safari)
+    /// Browser backends to try (comma-separated: chrome,edge,firefox,helium,safari,zen)
     #[arg(long, value_delimiter = ',')]
     browsers: Option<Vec<String>>,
 
@@ -40,6 +40,10 @@ struct Cli {
     /// Helium profile name or path
     #[arg(long)]
     helium_profile: Option<String>,
+
+    /// Zen profile name or path
+    #[arg(long)]
+    zen_profile: Option<String>,
 
     /// Safari cookies file path
     #[arg(long)]
@@ -113,6 +117,7 @@ async fn main() {
         (BrowserName::Edge, cli.edge_profile.as_ref()),
         (BrowserName::Firefox, cli.firefox_profile.as_ref()),
         (BrowserName::Helium, cli.helium_profile.as_ref()),
+        (BrowserName::Zen, cli.zen_profile.as_ref()),
     ] {
         if let Some(profile) = profile {
             options = options.browser_profile(browser, profile);
