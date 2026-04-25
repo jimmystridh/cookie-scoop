@@ -104,14 +104,14 @@ async fn main() {
     if let Some(m) = mode {
         options = options.mode(m);
     }
-    if let Some(ref p) = cli.chrome_profile {
-        options = options.chrome_profile(p);
-    }
-    if let Some(ref p) = cli.edge_profile {
-        options = options.edge_profile(p);
-    }
-    if let Some(ref p) = cli.firefox_profile {
-        options = options.firefox_profile(p);
+    for (browser, profile) in [
+        (BrowserName::Chrome, cli.chrome_profile.as_ref()),
+        (BrowserName::Edge, cli.edge_profile.as_ref()),
+        (BrowserName::Firefox, cli.firefox_profile.as_ref()),
+    ] {
+        if let Some(profile) = profile {
+            options = options.browser_profile(browser, profile);
+        }
     }
     if let Some(ref f) = cli.safari_cookies_file {
         options = options.safari_cookies_file(f);

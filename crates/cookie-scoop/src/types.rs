@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -87,9 +87,7 @@ pub struct GetCookiesOptions {
     pub names: Option<Vec<String>>,
     pub browsers: Option<Vec<BrowserName>>,
     pub profile: Option<String>,
-    pub chrome_profile: Option<String>,
-    pub edge_profile: Option<String>,
-    pub firefox_profile: Option<String>,
+    pub profiles: HashMap<BrowserName, String>,
     pub safari_cookies_file: Option<String>,
     pub include_expired: Option<bool>,
     pub timeout_ms: Option<u64>,
@@ -108,9 +106,7 @@ impl GetCookiesOptions {
             names: None,
             browsers: None,
             profile: None,
-            chrome_profile: None,
-            edge_profile: None,
-            firefox_profile: None,
+            profiles: HashMap::new(),
             safari_cookies_file: None,
             include_expired: None,
             timeout_ms: None,
@@ -137,18 +133,8 @@ impl GetCookiesOptions {
         self
     }
 
-    pub fn chrome_profile(mut self, profile: impl Into<String>) -> Self {
-        self.chrome_profile = Some(profile.into());
-        self
-    }
-
-    pub fn edge_profile(mut self, profile: impl Into<String>) -> Self {
-        self.edge_profile = Some(profile.into());
-        self
-    }
-
-    pub fn firefox_profile(mut self, profile: impl Into<String>) -> Self {
-        self.firefox_profile = Some(profile.into());
+    pub fn browser_profile(mut self, browser: BrowserName, profile: impl Into<String>) -> Self {
+        self.profiles.insert(browser, profile.into());
         self
     }
 

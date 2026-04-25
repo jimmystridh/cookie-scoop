@@ -88,7 +88,7 @@ let result = get_cookies(
 let result = get_cookies(
     GetCookiesOptions::new("https://example.com")
         .browsers(vec![BrowserName::Chrome])
-        .chrome_profile("Profile 1") // name or full path to Cookies DB
+        .browser_profile(BrowserName::Chrome, "Profile 1") // name or full path to Cookies DB
 ).await;
 ```
 
