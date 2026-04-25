@@ -1,13 +1,13 @@
 # cookie-scoop
 
-Cross-platform browser cookie extraction for Rust. Reads cookies from Chrome, Edge, Firefox, and Safari with full decryption support.
+Cross-platform browser cookie extraction for Rust. Reads cookies from Chrome, Edge, Firefox, Helium, Safari, and Zen with full decryption support.
 
 This is a Rust reimplementation of the concepts from [@steipete/sweet-cookie](https://github.com/steipete/sweet-cookie) (TypeScript) and [SweetCookieKit](https://github.com/steipete/SweetCookieKit) (Swift), providing the same inline-first approach and best-effort local reads as a native Rust library and CLI.
 
 ## Features
 
-- **Chrome & Edge** (macOS / Windows / Linux) — reads Chromium SQLite cookie databases with AES-128-CBC (macOS/Linux) and AES-256-GCM (Windows) decryption
-- **Firefox** (macOS / Windows / Linux) — reads `cookies.sqlite` with profile discovery
+- **Chrome, Edge & Helium** (macOS / Windows / Linux) — reads Chromium SQLite cookie databases with AES-128-CBC (macOS/Linux) and AES-256-GCM (Windows) decryption
+- **Firefox & Zen** (macOS / Windows / Linux) — reads `cookies.sqlite` with profile discovery
 - **Safari** (macOS only) — parses `Cookies.binarycookies`
 - **Inline cookies** — accepts JSON, base64, or file-based cookie payloads for environments where browser DB access isn't possible
 - **Zero native dependencies** — SQLite is bundled via `rusqlite`, OS integration uses platform CLI tools (`security`, `secret-tool`, `kwallet-query`, PowerShell)
@@ -88,7 +88,7 @@ let result = get_cookies(
 let result = get_cookies(
     GetCookiesOptions::new("https://example.com")
         .browsers(vec![BrowserName::Chrome])
-        .chrome_profile("Profile 1") // name or full path to Cookies DB
+        .browser_profile(BrowserName::Chrome, "Profile 1") // name or full path to Cookies DB
 ).await;
 ```
 
@@ -112,7 +112,7 @@ Also supports `inline_cookies_base64()` and `inline_cookies_file()`.
 cookie-scoop --url https://example.com
 
 # Specific browsers
-cookie-scoop --url https://example.com --browsers chrome,firefox
+cookie-scoop --url https://example.com --browsers chrome,firefox,helium,zen
 
 # Cookie header string
 cookie-scoop --url https://example.com --header --browsers chrome
@@ -137,7 +137,9 @@ cookie-scoop --url https://example.com --mode first
 | Chrome  |   Y   |   Y   |    Y    |
 | Edge    |   Y   |   Y   |    Y    |
 | Firefox |   Y   |   Y   |    Y    |
+| Helium  |   Y   |   Y   |    Y    |
 | Safari  |   Y   |   -   |    -    |
+| Zen     |   Y   |   Y   |    Y    |
 
 Chrome/Edge require modern Chromium cookie DB schemas (roughly Chrome >= 100).
 
@@ -162,14 +164,17 @@ Safari requires Full Disk Access on macOS.
 
 | Variable | Description |
 |----------|-------------|
-| `SWEET_COOKIE_BROWSERS` | Comma-separated browser list: `chrome,edge,firefox,safari` |
+| `SWEET_COOKIE_BROWSERS` | Comma-separated browser list: `chrome,edge,firefox,helium,safari,zen` |
 | `SWEET_COOKIE_MODE` | `merge` (default) or `first` |
 | `SWEET_COOKIE_CHROME_PROFILE` | Chrome profile name or path |
 | `SWEET_COOKIE_EDGE_PROFILE` | Edge profile name or path |
 | `SWEET_COOKIE_FIREFOX_PROFILE` | Firefox profile name or path |
+| `SWEET_COOKIE_HELIUM_PROFILE` | Helium profile name or path |
+| `SWEET_COOKIE_ZEN_PROFILE` | Zen profile name or path |
 | `SWEET_COOKIE_LINUX_KEYRING` | Linux keyring backend: `gnome`, `kwallet`, or `basic` |
 | `SWEET_COOKIE_CHROME_SAFE_STORAGE_PASSWORD` | Override Chrome safe storage password (Linux) |
 | `SWEET_COOKIE_EDGE_SAFE_STORAGE_PASSWORD` | Override Edge safe storage password (Linux) |
+| `SWEET_COOKIE_HELIUM_SAFE_STORAGE_PASSWORD` | Override Helium safe storage password (Linux) |
 
 Environment variable names are kept compatible with the original [sweet-cookie](https://github.com/steipete/sweet-cookie) TypeScript library.
 
