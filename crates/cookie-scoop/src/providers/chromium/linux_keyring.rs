@@ -7,20 +7,22 @@ pub enum LinuxKeyringBackend {
     Basic,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct LinuxKeyringApp {
+    pub password_env: &'static str,
+    pub service: &'static str,
+    pub account: &'static str,
+    pub folder: &'static str,
+    pub gnome_application: &'static str,
+}
+
 pub async fn get_linux_chromium_safe_storage_password(
-    app: &str, // "chrome" or "edge"
+    app: LinuxKeyringApp,
     backend_override: Option<LinuxKeyringBackend>,
 ) -> (String, Vec<String>) {
     let mut warnings = Vec::new();
 
-    // Check env override
-    let override_key = if app == "edge" {
-        "SWEET_COOKIE_EDGE_SAFE_STORAGE_PASSWORD"
-    } else {
-        "SWEET_COOKIE_CHROME_SAFE_STORAGE_PASSWORD"
-    };
-
-    if let Ok(val) = std::env::var(override_key) {
+    if let Ok(val) = std::env::var(app.password_env) {
         let trimmed = val.trim().to_string();
         if !trimmed.is_empty() {
             return (trimmed, warnings);
@@ -35,23 +37,12 @@ pub async fn get_linux_chromium_safe_storage_password(
         return (String::new(), warnings);
     }
 
-    let (service, account, folder) = if app == "edge" {
-        (
-            "Microsoft Edge Safe Storage",
-            "Microsoft Edge",
-            "Microsoft Edge Keys",
-        )
-    } else {
-        ("Chrome Safe Storage", "Chrome", "Chrome Keys")
-    };
-
     if backend == LinuxKeyringBackend::Gnome {
         // Try the new v2 schema first (application attribute), then fall back to old schema.
         // Modern Chrome versions store Safe Storage under `application=chrome`.
-        let application_attr = if app == "edge" { "msedge" } else { "chrome" };
         let res = exec_capture(
             "secret-tool",
-            &["lookup", "application", application_attr],
+            &["lookup", "application", app.gnome_application],
             Some(3_000),
         )
         .await;
@@ -61,7 +52,7 @@ pub async fn get_linux_chromium_safe_storage_password(
         // Fall back to old schema (service/account)
         let res = exec_capture(
             "secret-tool",
-            &["lookup", "service", service, "account", account],
+            &["lookup", "service", app.service, "account", app.account],
             Some(3_000),
         )
         .await;
@@ -90,7 +81,13 @@ pub async fn get_linux_chromium_safe_storage_password(
     let wallet = get_kwallet_network_wallet(service_name, wallet_path).await;
     let password_res = exec_capture(
         "kwallet-query",
-        &["--read-password", service, "--folder", folder, &wallet],
+        &[
+            "--read-password",
+            app.service,
+            "--folder",
+            app.folder,
+            &wallet,
+        ],
         Some(3_000),
     )
     .await;

@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::providers::chrome::{get_cookies_from_chrome, ChromeOptions};
-use crate::providers::edge::{get_cookies_from_edge, EdgeOptions};
-use crate::providers::firefox::{get_cookies_from_firefox, FirefoxOptions};
+use crate::providers::chromium::{
+    get_cookies_from_chromium, ChromiumBrowser, ChromiumOptions, CHROME, EDGE, HELIUM,
+};
+use crate::providers::firefox::{
+    get_cookies_from_firefox, FirefoxBrowser, FirefoxOptions, FIREFOX, ZEN,
+};
 use crate::providers::inline::{get_cookies_from_inline, InlineSource};
 use crate::providers::safari::{get_cookies_from_safari, SafariOptions};
 use crate::types::{
@@ -15,6 +18,7 @@ const DEFAULT_BROWSERS: &[BrowserName] = &[
     BrowserName::Chrome,
     BrowserName::Safari,
     BrowserName::Firefox,
+    BrowserName::Zen,
 ];
 
 pub async fn get_cookies(options: GetCookiesOptions) -> GetCookiesResult {
@@ -54,48 +58,54 @@ pub async fn get_cookies(options: GetCookiesOptions) -> GetCookiesResult {
 
     for browser in &browsers {
         let result = match browser {
-            BrowserName::Chrome => {
-                let chrome_profile = options
-                    .chrome_profile
-                    .clone()
-                    .or_else(|| options.profile.clone())
-                    .or_else(|| read_env("SWEET_COOKIE_CHROME_PROFILE"));
-
-                let chrome_options = ChromeOptions {
-                    profile: chrome_profile,
-                    timeout_ms: options.timeout_ms,
-                    include_expired: options.include_expired,
-                    debug: options.debug,
+            BrowserName::Chrome | BrowserName::Edge | BrowserName::Helium => {
+                let (browser, envs): (ChromiumBrowser, &[&str]) = match browser {
+                    BrowserName::Chrome => (CHROME, &["SWEET_COOKIE_CHROME_PROFILE"]),
+                    BrowserName::Edge => (
+                        EDGE,
+                        &["SWEET_COOKIE_EDGE_PROFILE", "SWEET_COOKIE_CHROME_PROFILE"],
+                    ),
+                    BrowserName::Helium => (
+                        HELIUM,
+                        &["SWEET_COOKIE_HELIUM_PROFILE", "SWEET_COOKIE_CHROME_PROFILE"],
+                    ),
+                    _ => unreachable!(),
                 };
-                get_cookies_from_chrome(chrome_options, &origins, names.as_ref()).await
+
+                get_cookies_from_chromium(
+                    browser,
+                    ChromiumOptions {
+                        profile: resolve_profile(&options, browser.name, true, envs),
+                        timeout_ms: options.timeout_ms,
+                        include_expired: options.include_expired,
+                    },
+                    &origins,
+                    names.as_ref(),
+                )
+                .await
             }
-            BrowserName::Edge => {
-                let edge_profile = options
-                    .edge_profile
-                    .clone()
-                    .or_else(|| options.profile.clone())
-                    .or_else(|| read_env("SWEET_COOKIE_EDGE_PROFILE"))
-                    .or_else(|| read_env("SWEET_COOKIE_CHROME_PROFILE"));
+            BrowserName::Firefox | BrowserName::Zen => {
+                let (browser, use_generic_profile, envs): (FirefoxBrowser, bool, &[&str]) =
+                    match browser {
+                        BrowserName::Firefox => (FIREFOX, false, &["SWEET_COOKIE_FIREFOX_PROFILE"]),
+                        BrowserName::Zen => (
+                            ZEN,
+                            true,
+                            &["SWEET_COOKIE_ZEN_PROFILE", "SWEET_COOKIE_FIREFOX_PROFILE"],
+                        ),
+                        _ => unreachable!(),
+                    };
 
-                let edge_options = EdgeOptions {
-                    profile: edge_profile,
-                    timeout_ms: options.timeout_ms,
-                    include_expired: options.include_expired,
-                    debug: options.debug,
-                };
-                get_cookies_from_edge(edge_options, &origins, names.as_ref()).await
-            }
-            BrowserName::Firefox => {
-                let firefox_profile = options
-                    .firefox_profile
-                    .clone()
-                    .or_else(|| read_env("SWEET_COOKIE_FIREFOX_PROFILE"));
-
-                let firefox_options = FirefoxOptions {
-                    profile: firefox_profile,
-                    include_expired: options.include_expired,
-                };
-                get_cookies_from_firefox(firefox_options, &origins, names.as_ref()).await
+                get_cookies_from_firefox(
+                    browser,
+                    FirefoxOptions {
+                        profile: resolve_profile(&options, browser.name, use_generic_profile, envs),
+                        include_expired: options.include_expired,
+                    },
+                    &origins,
+                    names.as_ref(),
+                )
+                .await
             }
             BrowserName::Safari => {
                 let safari_options = SafariOptions {
@@ -184,6 +194,24 @@ fn resolve_inline_sources(options: &GetCookiesOptions) -> Vec<InlineSource> {
         });
     }
     sources
+}
+
+fn resolve_profile(
+    options: &GetCookiesOptions,
+    browser: BrowserName,
+    use_generic_profile: bool,
+    envs: &[&str],
+) -> Option<String> {
+    options
+        .profiles
+        .get(&browser)
+        .cloned()
+        .or_else(|| {
+            use_generic_profile
+                .then(|| options.profile.clone())
+                .flatten()
+        })
+        .or_else(|| envs.iter().find_map(|key| read_env(key)))
 }
 
 fn parse_browsers_env() -> Option<Vec<BrowserName>> {

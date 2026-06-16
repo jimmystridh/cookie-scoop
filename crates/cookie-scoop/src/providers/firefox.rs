@@ -7,45 +7,62 @@ use crate::types::{
 use crate::util::host_match::host_matches_cookie_domain;
 use url::Url;
 
+#[derive(Debug, Clone, Copy)]
+pub struct FirefoxBrowser {
+    pub name: BrowserName,
+    label: &'static str,
+    temp_prefix: &'static str,
+    roots: fn() -> Vec<PathBuf>,
+    preferred_profile_markers: &'static [&'static str],
+}
+
+#[derive(Debug, Default)]
+pub struct FirefoxOptions {
+    pub profile: Option<String>,
+    pub include_expired: Option<bool>,
+}
+
+pub const FIREFOX: FirefoxBrowser = FirefoxBrowser {
+    name: BrowserName::Firefox,
+    label: "Firefox",
+    temp_prefix: "cookie-scoop-firefox-",
+    roots: firefox_roots,
+    preferred_profile_markers: &["default-release"],
+};
+
+pub const ZEN: FirefoxBrowser = FirefoxBrowser {
+    name: BrowserName::Zen,
+    label: "Zen",
+    temp_prefix: "cookie-scoop-zen-",
+    roots: zen_roots,
+    preferred_profile_markers: &["Default", "default"],
+};
+
 pub async fn get_cookies_from_firefox(
+    browser: FirefoxBrowser,
     options: FirefoxOptions,
     origins: &[String],
     allowlist_names: Option<&HashSet<String>>,
 ) -> GetCookiesResult {
-    let mut warnings = Vec::new();
-    let db_path = resolve_firefox_cookies_db(options.profile.as_deref());
-    let db_path = match db_path {
-        Some(p) => p,
-        None => {
-            warnings.push("Firefox cookies database not found.".to_string());
-            return GetCookiesResult {
-                cookies: vec![],
-                warnings,
-            };
-        }
+    let Some(db_path) = resolve_firefox_cookies_db(
+        options.profile.as_deref(),
+        &(browser.roots)(),
+        browser.preferred_profile_markers,
+    ) else {
+        return warning(format!("{} cookies database not found.", browser.label));
     };
 
     let temp_dir = match tempfile::Builder::new()
-        .prefix("cookie-scoop-firefox-")
+        .prefix(browser.temp_prefix)
         .tempdir()
     {
         Ok(d) => d,
-        Err(e) => {
-            warnings.push(format!("Failed to create temp dir: {e}"));
-            return GetCookiesResult {
-                cookies: vec![],
-                warnings,
-            };
-        }
+        Err(e) => return warning(format!("Failed to create temp dir: {e}")),
     };
 
     let temp_db_path = temp_dir.path().join("cookies.sqlite");
     if let Err(e) = std::fs::copy(&db_path, &temp_db_path) {
-        warnings.push(format!("Failed to copy Firefox cookie DB: {e}"));
-        return GetCookiesResult {
-            cookies: vec![],
-            warnings,
-        };
+        return warning(format!("Failed to copy {} cookie DB: {e}", browser.label));
     }
     copy_sidecar(&db_path, &temp_db_path, "-wal");
     copy_sidecar(&db_path, &temp_db_path, "-shm");
@@ -77,6 +94,7 @@ pub async fn get_cookies_from_firefox(
 
     let db_path_str = temp_db_path.to_string_lossy().to_string();
     let profile = options.profile.clone();
+    let browser_name = browser.name;
     let names_owned = allowlist_names.cloned();
     let result = tokio::task::spawn_blocking(move || {
         query_firefox_cookies(
@@ -86,6 +104,7 @@ pub async fn get_cookies_from_firefox(
             include_expired,
             names_owned.as_ref(),
             profile.as_deref(),
+            browser_name,
         )
     })
     .await;
@@ -93,29 +112,11 @@ pub async fn get_cookies_from_firefox(
     match result {
         Ok(Ok(cookies)) => GetCookiesResult {
             cookies: dedupe_cookies(cookies),
-            warnings,
+            warnings: vec![],
         },
-        Ok(Err(e)) => {
-            warnings.push(format!("Failed reading Firefox cookies: {e}"));
-            GetCookiesResult {
-                cookies: vec![],
-                warnings,
-            }
-        }
-        Err(e) => {
-            warnings.push(format!("Firefox cookie task failed: {e}"));
-            GetCookiesResult {
-                cookies: vec![],
-                warnings,
-            }
-        }
+        Ok(Err(e)) => warning(format!("Failed reading {} cookies: {e}", browser.label)),
+        Err(e) => warning(format!("{} cookie task failed: {e}", browser.label)),
     }
-}
-
-#[derive(Debug, Default)]
-pub struct FirefoxOptions {
-    pub profile: Option<String>,
-    pub include_expired: Option<bool>,
 }
 
 fn query_firefox_cookies(
@@ -125,6 +126,7 @@ fn query_firefox_cookies(
     include_expired: bool,
     allowlist_names: Option<&HashSet<String>>,
     profile: Option<&str>,
+    browser: BrowserName,
 ) -> Result<Vec<Cookie>, String> {
     let conn = rusqlite::Connection::open_with_flags(
         db_path,
@@ -170,10 +172,8 @@ fn query_firefox_cookies(
         if name.is_empty() {
             continue;
         }
-        if let Some(names) = allowlist_names {
-            if !names.is_empty() && !names.contains(&name) {
-                continue;
-            }
+        if allowlist_names.is_some_and(|names| !names.is_empty() && !names.contains(&name)) {
+            continue;
         }
 
         let cookie_domain = host.strip_prefix('.').unwrap_or(&host);
@@ -185,12 +185,8 @@ fn query_firefox_cookies(
         }
 
         let expires = if expiry > 0 { Some(expiry) } else { None };
-        if !include_expired {
-            if let Some(exp) = expires {
-                if exp < now {
-                    continue;
-                }
-            }
+        if !include_expired && expires.is_some_and(|exp| exp < now) {
+            continue;
         }
 
         let domain = host.strip_prefix('.').unwrap_or(&host).to_string();
@@ -201,15 +197,12 @@ fn query_firefox_cookies(
             _ => None,
         };
 
-        let mut source = CookieSource {
-            browser: BrowserName::Firefox,
-            profile: None,
+        let source = CookieSource {
+            browser,
+            profile: profile.map(str::to_string),
             origin: None,
             store_id: None,
         };
-        if let Some(p) = profile {
-            source.profile = Some(p.to_string());
-        }
 
         cookies.push(Cookie {
             name,
@@ -232,23 +225,18 @@ fn query_firefox_cookies(
     Ok(cookies)
 }
 
-fn resolve_firefox_cookies_db(profile: Option<&str>) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+fn warning(message: impl Into<String>) -> GetCookiesResult {
+    GetCookiesResult {
+        cookies: vec![],
+        warnings: vec![message.into()],
+    }
+}
 
-    let roots: Vec<PathBuf> = if cfg!(target_os = "macos") {
-        vec![home.join("Library/Application Support/Firefox/Profiles")]
-    } else if cfg!(target_os = "linux") {
-        vec![home.join(".mozilla/firefox")]
-    } else if cfg!(target_os = "windows") {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            vec![PathBuf::from(appdata).join("Mozilla/Firefox/Profiles")]
-        } else {
-            vec![]
-        }
-    } else {
-        vec![]
-    };
-
+fn resolve_firefox_cookies_db(
+    profile: Option<&str>,
+    roots: &[PathBuf],
+    preferred_profile_markers: &[&str],
+) -> Option<PathBuf> {
     if let Some(profile) = profile {
         if looks_like_path(profile) {
             let p = PathBuf::from(profile);
@@ -265,7 +253,7 @@ fn resolve_firefox_cookies_db(profile: Option<&str>) -> Option<PathBuf> {
         }
     }
 
-    for root in &roots {
+    for root in roots {
         if !root.exists() {
             continue;
         }
@@ -278,8 +266,10 @@ fn resolve_firefox_cookies_db(profile: Option<&str>) -> Option<PathBuf> {
         }
 
         let entries = safe_readdir(root);
-        let default_release = entries.iter().find(|e| e.contains("default-release"));
-        let picked = default_release.or(entries.first());
+        let preferred_profile = preferred_profile_markers
+            .iter()
+            .find_map(|marker| entries.iter().find(|e| e.contains(marker)));
+        let picked = preferred_profile.or(entries.first());
         if let Some(picked) = picked {
             let candidate = root.join(picked).join("cookies.sqlite");
             if candidate.exists() {
@@ -291,15 +281,75 @@ fn resolve_firefox_cookies_db(profile: Option<&str>) -> Option<PathBuf> {
     None
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn home_roots(paths: &[&str]) -> Vec<PathBuf> {
+    dirs::home_dir()
+        .map(|home| paths.iter().map(|path| home.join(path)).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn appdata_roots(paths: &[&str]) -> Vec<PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(|appdata| {
+            paths
+                .iter()
+                .map(|path| PathBuf::from(&appdata).join(path))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "macos")]
+fn firefox_roots() -> Vec<PathBuf> {
+    home_roots(&["Library/Application Support/Firefox/Profiles"])
+}
+
+#[cfg(target_os = "macos")]
+fn zen_roots() -> Vec<PathBuf> {
+    home_roots(&["Library/Application Support/zen/Profiles"])
+}
+
+#[cfg(target_os = "linux")]
+fn firefox_roots() -> Vec<PathBuf> {
+    home_roots(&[".mozilla/firefox"])
+}
+
+#[cfg(target_os = "linux")]
+fn zen_roots() -> Vec<PathBuf> {
+    home_roots(&[".zen", ".var/app/app.zen_browser.zen/.zen"])
+}
+
+#[cfg(target_os = "windows")]
+fn firefox_roots() -> Vec<PathBuf> {
+    appdata_roots(&["Mozilla/Firefox/Profiles"])
+}
+
+#[cfg(target_os = "windows")]
+fn zen_roots() -> Vec<PathBuf> {
+    appdata_roots(&["zen/Profiles"])
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn firefox_roots() -> Vec<PathBuf> {
+    vec![]
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn zen_roots() -> Vec<PathBuf> {
+    vec![]
+}
+
 fn safe_readdir(dir: &Path) -> Vec<String> {
-    match std::fs::read_dir(dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-            .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-            .collect(),
-        Err(_) => vec![],
-    }
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn looks_like_path(value: &str) -> bool {
