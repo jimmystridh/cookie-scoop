@@ -1,6 +1,6 @@
 # cookie-scoop
 
-Cross-platform browser cookie extraction for Rust. Reads cookies from Chrome, Edge, Firefox, and Safari with full decryption support.
+Cross-platform browser cookie extraction for Rust. Reads cookies from Chrome, Edge, Firefox, and Safari with platform-specific decryption.
 
 This is a Rust reimplementation of the concepts from [@steipete/sweet-cookie](https://github.com/steipete/sweet-cookie) (TypeScript) and [SweetCookieKit](https://github.com/steipete/SweetCookieKit) (Swift), providing the same inline-first approach and best-effort local reads as a native Rust library and CLI.
 
@@ -20,7 +20,7 @@ This is a Rust reimplementation of the concepts from [@steipete/sweet-cookie](ht
 
 ```toml
 [dependencies]
-cookie-scoop = "0.1"
+cookie-scoop = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -92,6 +92,14 @@ let result = get_cookies(
 ).await;
 ```
 
+Pass `ProfileSelection::Selected(vec![...])` or `ProfileSelection::All` to
+`chrome_profiles()`, `edge_profiles()`, or `firefox_profiles()` to read multiple profiles.
+Chromium selectors accept directory names, display names, profile directories, and database paths.
+Use `safari_cookies_files()` for multiple Safari cookie files.
+
+The Chrome backend also supports `chromium_browser(ChromiumBrowser::Brave)` or
+`ChromiumBrowser::Chromium` on Linux and macOS. Arc and Dia are available on macOS.
+
 ### Inline cookies
 
 Works on any OS/runtime — no browser DB access required:
@@ -119,6 +127,13 @@ cookie-scoop --url https://example.com --header --browsers chrome
 
 # Specific profile
 cookie-scoop --url https://example.com --browsers chrome --chrome-profile "Profile 1"
+
+# Multiple profiles or all discovered Firefox profiles
+cookie-scoop --url https://example.com --browsers chrome --chrome-profile Default --chrome-profile "Profile 1"
+cookie-scoop --url https://example.com --browsers firefox --all-profiles
+
+# Explicit Chromium-family browser
+cookie-scoop --url https://example.com --browsers chrome --chromium-browser brave
 
 # Filter by cookie name
 cookie-scoop --url https://example.com --names session,csrf
@@ -154,9 +169,10 @@ Safari requires Full Disk Access on macOS.
 ### Implementation notes
 
 - **Cookie DB copying** — the Chromium/Firefox SQLite databases are copied to a temp directory (along with `-wal` and `-shm` sidecars) before reading, avoiding locks from running browsers. Temp files are cleaned up automatically via `tempfile::TempDir` RAII.
-- **Chromium meta version** — the `meta` table's `version` column is stored as TEXT in modern Chrome. cookie-scoop reads it as a string and parses to integer, correctly handling the hash-prefix stripping introduced in version 24+.
+- **Chromium host verification** — schema 24+ binds encrypted cookie values to the stored host key. cookie-scoop verifies that binding before returning a decrypted value and reports unreadable `v20` App-Bound cookies in warnings.
 - **GNOME keyring v2 schema** — modern Chrome stores the safe storage password under the `application=chrome` attribute rather than the legacy `service`/`account` attributes. cookie-scoop tries the v2 schema first, falling back to v1.
-- **Cookie deduplication** — cookies are deduped by `name|domain|path` key, keeping the first occurrence. This prevents duplicates when merge mode combines results from multiple browsers.
+- **Cookie scope** — JSON preserves `hostOnly` when available. Host-only cookies match an exact hostname. Domain cookies may also match its subdomains. Deduplication includes cookie scope and keeps records from separately selected profiles within each browser.
+- **Cookie isolation** — partitioned cookies and Firefox container cookies are excluded because HTTP cookie headers cannot represent those boundaries. When isolated inline cookies are rejected, cookie-scoop tries any remaining inline sources and returns an empty result if none match.
 
 ## Environment variables
 
@@ -170,6 +186,8 @@ Safari requires Full Disk Access on macOS.
 | `SWEET_COOKIE_LINUX_KEYRING` | Linux keyring backend: `gnome`, `kwallet`, or `basic` |
 | `SWEET_COOKIE_CHROME_SAFE_STORAGE_PASSWORD` | Override Chrome safe storage password (Linux) |
 | `SWEET_COOKIE_EDGE_SAFE_STORAGE_PASSWORD` | Override Edge safe storage password (Linux) |
+| `SWEET_COOKIE_BRAVE_SAFE_STORAGE_PASSWORD` | Override Brave safe storage password (Linux) |
+| `SWEET_COOKIE_CHROMIUM_SAFE_STORAGE_PASSWORD` | Override Chromium safe storage password (Linux) |
 
 Environment variable names are kept compatible with the original [sweet-cookie](https://github.com/steipete/sweet-cookie) TypeScript library.
 

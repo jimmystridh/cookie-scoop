@@ -9,11 +9,13 @@ pub struct ExecResult {
 }
 
 pub async fn exec_capture(program: &str, args: &[&str], timeout_ms: Option<u64>) -> ExecResult {
-    let timeout = Duration::from_millis(timeout_ms.unwrap_or(10_000));
+    let timeout_ms = timeout_ms.unwrap_or(10_000);
+    let timeout = Duration::from_millis(timeout_ms);
 
     let result = tokio::time::timeout(timeout, async {
         let output = Command::new(program)
             .args(args)
+            .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -22,7 +24,7 @@ pub async fn exec_capture(program: &str, args: &[&str], timeout_ms: Option<u64>)
 
         match output {
             Ok(output) => ExecResult {
-                code: output.status.code().unwrap_or(0),
+                code: output.status.code().unwrap_or(1),
                 stdout: String::from_utf8_lossy(&output.stdout).to_string(),
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             },
@@ -40,7 +42,7 @@ pub async fn exec_capture(program: &str, args: &[&str], timeout_ms: Option<u64>)
         Err(_) => ExecResult {
             code: 124,
             stdout: String::new(),
-            stderr: format!("Timed out after {timeout_ms:?}ms"),
+            stderr: format!("Timed out after {timeout_ms}ms"),
         },
     }
 }

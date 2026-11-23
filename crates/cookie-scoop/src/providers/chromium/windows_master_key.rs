@@ -3,6 +3,15 @@ pub async fn get_windows_chromium_master_key(
     user_data_dir: &std::path::Path,
     label: &str,
 ) -> Result<Vec<u8>, String> {
+    read_windows_chromium_master_key(user_data_dir, label, None).await
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) async fn read_windows_chromium_master_key(
+    user_data_dir: &std::path::Path,
+    label: &str,
+    timeout_ms: Option<u64>,
+) -> Result<Vec<u8>, String> {
     use super::windows_dpapi::dpapi_unprotect;
     use base64::Engine;
 
@@ -34,6 +43,6 @@ pub async fn get_windows_chromium_master_key(
         ));
     }
 
-    let unprotected = dpapi_unprotect(&encrypted_key[prefix.len()..], None).await?;
+    let unprotected = dpapi_unprotect(&encrypted_key[prefix.len()..], timeout_ms).await?;
     Ok(unprotected)
 }

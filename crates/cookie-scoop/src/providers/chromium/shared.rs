@@ -1,14 +1,20 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use rusqlite::types::ValueRef;
 
 use crate::types::{
     dedupe_cookies, BrowserName, Cookie, CookieSameSite, CookieSource, GetCookiesResult,
 };
 use crate::util::expire::normalize_expiration;
-use crate::util::host_match::host_matches_cookie_domain;
-use url::Url;
+use crate::util::host_match::host_matches_cookie_scope;
+use crate::util::origins::extract_host;
+use crate::util::sqlite::{copy_database, host_predicate, table_columns, READ_ONLY};
 
-pub type DecryptFn = Box<dyn Fn(&[u8], bool) -> Option<String> + Send + Sync>;
+use super::crypto::DecryptError;
+
+pub type DecryptFn = Box<dyn Fn(&[u8], Option<&str>) -> Result<String, DecryptError> + Send + Sync>;
 
 pub async fn get_cookies_from_chrome_sqlite_db(
     db_path: &str,
@@ -19,316 +25,226 @@ pub async fn get_cookies_from_chrome_sqlite_db(
     decrypt: DecryptFn,
     browser: BrowserName,
 ) -> GetCookiesResult {
-    let mut warnings = Vec::new();
+    read_database(
+        PathBuf::from(db_path),
+        CookieSource {
+            browser,
+            profile: profile.map(str::to_owned),
+            origin: None,
+            store_id: None,
+        },
+        include_expired,
+        origins,
+        allowlist_names,
+        decrypt,
+    )
+    .await
+}
 
-    let temp_dir = match tempfile::Builder::new()
-        .prefix("cookie-scoop-chrome-")
-        .tempdir()
-    {
-        Ok(d) => d,
-        Err(e) => {
-            warnings.push(format!("Failed to create temp dir: {e}"));
-            return GetCookiesResult {
-                cookies: vec![],
-                warnings,
-            };
-        }
-    };
-
-    let temp_db_path = temp_dir.path().join("Cookies");
-    let source_path = Path::new(db_path);
-    if let Err(e) = std::fs::copy(source_path, &temp_db_path) {
-        warnings.push(format!("Failed to copy Chrome cookie DB: {e}"));
+pub(crate) async fn read_database(
+    db_path: PathBuf,
+    source: CookieSource,
+    include_expired: bool,
+    origins: &[String],
+    allowlist_names: Option<&HashSet<String>>,
+    decrypt: DecryptFn,
+) -> GetCookiesResult {
+    let hosts: Vec<_> = origins
+        .iter()
+        .filter_map(|origin| extract_host(origin))
+        .collect();
+    if hosts.is_empty() {
         return GetCookiesResult {
             cookies: vec![],
-            warnings,
+            warnings: vec![],
         };
     }
-    copy_sidecar(source_path, &temp_db_path, "-wal");
-    copy_sidecar(source_path, &temp_db_path, "-shm");
 
-    let hosts: Vec<String> = origins
-        .iter()
-        .filter_map(|o| {
-            Url::parse(o)
-                .ok()
-                .and_then(|u| u.host_str().map(|h| h.to_string()))
-        })
-        .collect();
-    let where_clause = build_host_where_clause(&hosts);
-
-    let temp_db_str = temp_db_path.to_string_lossy().to_string();
-    let profile_owned = profile.map(|s| s.to_string());
-    let names_owned = allowlist_names.cloned();
-    let hosts_clone = hosts.clone();
-
+    let names = allowlist_names.cloned();
     let result = tokio::task::spawn_blocking(move || {
-        query_chrome_cookies(
-            &temp_db_str,
-            &where_clause,
-            &hosts_clone,
+        query_chromium_cookies(
+            &db_path,
+            &source,
             include_expired,
-            names_owned.as_ref(),
-            profile_owned.as_deref(),
+            &hosts,
+            names.as_ref(),
             &decrypt,
-            browser,
         )
     })
     .await;
-
     match result {
-        Ok(Ok((cookies, mut db_warnings))) => {
-            warnings.append(&mut db_warnings);
-            GetCookiesResult {
-                cookies: dedupe_cookies(cookies),
-                warnings,
-            }
-        }
-        Ok(Err(e)) => {
-            warnings.push(e);
-            GetCookiesResult {
-                cookies: vec![],
-                warnings,
-            }
-        }
-        Err(e) => {
-            warnings.push(format!("Chrome cookie task failed: {e}"));
-            GetCookiesResult {
-                cookies: vec![],
-                warnings,
-            }
-        }
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => GetCookiesResult {
+            cookies: vec![],
+            warnings: vec![format!("Failed reading Chromium cookies: {error}")],
+        },
+        Err(error) => GetCookiesResult {
+            cookies: vec![],
+            warnings: vec![format!("Chromium cookie task failed: {error}")],
+        },
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn query_chrome_cookies(
-    db_path: &str,
-    where_clause: &str,
-    hosts: &[String],
+fn query_chromium_cookies(
+    db_path: &Path,
+    source: &CookieSource,
     include_expired: bool,
+    hosts: &[String],
     allowlist_names: Option<&HashSet<String>>,
-    profile: Option<&str>,
     decrypt: &DecryptFn,
-    browser: BrowserName,
-) -> Result<(Vec<Cookie>, Vec<String>), String> {
-    let mut warnings = Vec::new();
-    let conn = rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| format!("Failed to open Chrome cookie DB: {e}"))?;
-
-    let meta_version = read_meta_version(&conn);
-    let strip_hash_prefix = meta_version >= 24;
-
-    let sql = format!(
-        "SELECT name, value, host_key, path, expires_utc, samesite, encrypted_value, \
-         is_secure, is_httponly \
-         FROM cookies WHERE ({where_clause}) ORDER BY expires_utc DESC;"
-    );
-
-    let mut stmt = conn.prepare(&sql).map_err(|e| {
-        format!("Failed reading Chrome cookies (requires modern Chromium, e.g. Chrome >= 100): {e}")
-    })?;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+) -> Result<GetCookiesResult, Box<dyn std::error::Error + Send + Sync>> {
+    let temp = tempfile::Builder::new()
+        .prefix("cookie-scoop-chrome-")
+        .tempdir()?;
+    let snapshot = temp.path().join("Cookies");
+    copy_database(db_path, &snapshot)?;
+    let conn = rusqlite::Connection::open_with_flags(snapshot, READ_ONLY)?;
+    let verify_binding = read_meta_version(&conn) >= 24;
+    let columns = table_columns(&conn, "cookies")?;
+    let partition_key = if columns.contains("top_frame_site_key") {
+        "top_frame_site_key"
+    } else {
+        "NULL"
+    };
+    let host_filter = host_predicate(hosts, "host_key");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT name, value, host_key, path, expires_utc, samesite, encrypted_value,
+                is_secure, is_httponly, {partition_key}
+         FROM cookies WHERE ({host_filter}) ORDER BY expires_utc DESC"
+    ))?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
 
+    let mut rows = stmt.query([])?;
     let mut cookies = Vec::new();
-    let mut warned_encrypted_type = false;
-
-    let rows = stmt
-        .query_map([], |row| {
-            let name: String = row.get(0)?;
-            let value: String = row.get(1)?;
-            let host_key: String = row.get(2)?;
-            let path: String = row.get(3)?;
-            let expires_utc: i64 = row.get(4)?;
-            let samesite: i32 = row.get(5)?;
-            let encrypted_value: Option<Vec<u8>> = row.get(6)?;
-            let is_secure: i32 = row.get(7)?;
-            let is_httponly: i32 = row.get(8)?;
-            Ok((
-                name,
-                value,
-                host_key,
-                path,
-                expires_utc,
-                samesite,
-                encrypted_value,
-                is_secure,
-                is_httponly,
-            ))
-        })
-        .map_err(|e| e.to_string())?;
-
-    for row in rows {
-        let (
-            name,
-            value,
-            host_key,
-            path,
-            expires_utc,
-            samesite,
-            encrypted_value,
-            is_secure,
-            is_httponly,
-        ) = row.map_err(|e| e.to_string())?;
-
-        if name.is_empty() {
-            continue;
-        }
-        if let Some(names) = allowlist_names {
-            if !names.is_empty() && !names.contains(&name) {
-                continue;
-            }
-        }
-
-        let cookie_domain = host_key.strip_prefix('.').unwrap_or(&host_key);
-        if !hosts
-            .iter()
-            .any(|h| host_matches_cookie_domain(h, cookie_domain))
+    let mut warnings = Vec::new();
+    let mut partitioned = 0;
+    let mut invalid_binding = 0;
+    let mut app_bound = 0;
+    let mut decrypt_failed = 0;
+    let mut unsupported_type = false;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(0)?;
+        if name.is_empty()
+            || allowlist_names.is_some_and(|names| !names.is_empty() && !names.contains(&name))
         {
             continue;
         }
 
-        let mut cookie_value: Option<String> = if !value.is_empty() { Some(value) } else { None };
-
-        if cookie_value.is_none() {
-            if let Some(ref enc_bytes) = encrypted_value {
-                if !enc_bytes.is_empty() {
-                    cookie_value = decrypt(enc_bytes, strip_hash_prefix);
-                }
-            } else if encrypted_value.is_some() && !warned_encrypted_type {
-                warnings
-                    .push("Chrome cookie encrypted_value is in an unsupported type.".to_string());
-                warned_encrypted_type = true;
-            }
+        let host: String = row.get(2)?;
+        let host_only = !host.starts_with('.');
+        if !hosts
+            .iter()
+            .any(|requested| host_matches_cookie_scope(requested, &host, host_only))
+        {
+            continue;
+        }
+        if row
+            .get::<_, Option<String>>(9)?
+            .is_some_and(|key| !key.trim().is_empty())
+        {
+            partitioned += 1;
+            continue;
         }
 
-        let cookie_value = match cookie_value {
-            Some(v) => v,
-            None => continue,
-        };
+        let expires = normalize_expiration(row.get(4)?);
+        if !include_expired && expires.is_some_and(|expiry| expiry < now) {
+            continue;
+        }
 
-        let expires = if expires_utc != 0 {
-            normalize_expiration(expires_utc)
-        } else {
-            None
-        };
-
-        if !include_expired {
-            if let Some(exp) = expires {
-                if exp < now {
+        let value: String = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+        let value = if value.is_empty() {
+            let encrypted = match row.get_ref(6)? {
+                ValueRef::Blob(encrypted) if !encrypted.is_empty() => encrypted,
+                ValueRef::Blob(_) | ValueRef::Null => continue,
+                _ => {
+                    unsupported_type = true;
+                    continue;
+                }
+            };
+            match decrypt(encrypted, verify_binding.then_some(host.as_str())) {
+                Ok(value) => value,
+                Err(error) => {
+                    if encrypted.starts_with(b"v20") {
+                        app_bound += 1;
+                    } else if error == DecryptError::HostBinding {
+                        invalid_binding += 1;
+                    } else {
+                        decrypt_failed += 1;
+                    }
                     continue;
                 }
             }
-        }
+        } else {
+            value
+        };
 
-        let domain = host_key.strip_prefix('.').unwrap_or(&host_key).to_string();
-
-        let same_site = match samesite {
-            2 => Some(CookieSameSite::Strict),
-            1 => Some(CookieSameSite::Lax),
-            0 => Some(CookieSameSite::None),
+        let same_site = match row.get::<_, Option<i32>>(5)? {
+            Some(2) => Some(CookieSameSite::Strict),
+            Some(1) => Some(CookieSameSite::Lax),
+            Some(0) => Some(CookieSameSite::None),
             _ => None,
         };
-
-        let mut source = CookieSource {
-            browser,
-            profile: None,
-            origin: None,
-            store_id: None,
-        };
-        if let Some(p) = profile {
-            source.profile = Some(p.to_string());
-        }
-
+        let path: String = row.get(3)?;
         cookies.push(Cookie {
             name,
-            value: cookie_value,
-            domain: Some(domain),
+            value,
+            domain: Some(host.trim_start_matches('.').to_owned()),
+            host_only: Some(host_only),
             path: Some(if path.is_empty() {
-                "/".to_string()
+                "/".to_owned()
             } else {
                 path
             }),
             url: None,
             expires,
-            secure: Some(is_secure != 0),
-            http_only: Some(is_httponly != 0),
+            secure: Some(row.get::<_, i32>(7)? != 0),
+            http_only: Some(row.get::<_, i32>(8)? != 0),
             same_site,
-            source: Some(source),
+            source: Some(source.clone()),
         });
     }
-
-    Ok((cookies, warnings))
+    if partitioned != 0 {
+        warnings.push(format!(
+            "{partitioned} partitioned Chromium cookie(s) were excluded."
+        ));
+    }
+    if invalid_binding != 0 {
+        warnings.push(format!(
+            "{invalid_binding} Chromium cookie(s) failed host binding verification."
+        ));
+    }
+    if app_bound != 0 {
+        warnings.push(format!("{app_bound} Chromium cookie(s) use v20 App-Bound Encryption and could not be decrypted."));
+    }
+    if decrypt_failed != 0 {
+        warnings.push(format!(
+            "{decrypt_failed} Chromium cookie(s) could not be decrypted."
+        ));
+    }
+    if unsupported_type {
+        warnings.push("Chromium cookie encrypted_value is in an unsupported type.".to_owned());
+    }
+    Ok(GetCookiesResult {
+        cookies: dedupe_cookies(cookies),
+        warnings,
+    })
 }
 
 fn read_meta_version(conn: &rusqlite::Connection) -> i64 {
-    // The meta table stores version as text, so try String first, then i64.
-    let result: Result<String, _> =
-        conn.query_row("SELECT value FROM meta WHERE key = 'version'", [], |row| {
-            row.get(0)
-        });
-    match result {
-        Ok(s) => s.trim().parse::<i64>().unwrap_or(0),
-        Err(_) => conn
-            .query_row("SELECT value FROM meta WHERE key = 'version'", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap_or(0),
-    }
-}
-
-fn copy_sidecar(source_path: &Path, temp_path: &Path, suffix: &str) {
-    let sidecar = PathBuf::from(format!("{}{suffix}", source_path.to_string_lossy()));
-    let target = PathBuf::from(format!("{}{suffix}", temp_path.to_string_lossy()));
-    if sidecar.exists() {
-        let _ = std::fs::copy(&sidecar, &target);
-    }
-}
-
-fn build_host_where_clause(hosts: &[String]) -> String {
-    let mut clauses = Vec::new();
-    for host in hosts {
-        for candidate in expand_host_candidates(host) {
-            let escaped = sql_literal(&candidate);
-            let escaped_dot = sql_literal(&format!(".{candidate}"));
-            let escaped_like = sql_literal(&format!("%.{candidate}"));
-            clauses.push(format!("host_key = {escaped}"));
-            clauses.push(format!("host_key = {escaped_dot}"));
-            clauses.push(format!("host_key LIKE {escaped_like}"));
-        }
-    }
-    if clauses.is_empty() {
-        "1=0".to_string()
-    } else {
-        clauses.join(" OR ")
-    }
-}
-
-fn expand_host_candidates(host: &str) -> Vec<String> {
-    let parts: Vec<&str> = host.split('.').filter(|p| !p.is_empty()).collect();
-    if parts.len() <= 1 {
-        return vec![host.to_string()];
-    }
-    let mut candidates = Vec::new();
-    candidates.push(host.to_string());
-    // Include parent domains down to two labels (avoid TLD-only)
-    for i in 1..=(parts.len().saturating_sub(2)) {
-        let candidate = parts[i..].join(".");
-        if !candidate.is_empty() {
-            candidates.push(candidate);
-        }
-    }
-    candidates
-}
-
-fn sql_literal(value: &str) -> String {
-    let escaped = value.replace('\'', "''");
-    format!("'{escaped}'")
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = 'version'",
+        [],
+        |row| match row.get_ref(0)? {
+            ValueRef::Integer(value) => Ok(value),
+            ValueRef::Text(value) => Ok(std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(0)),
+            _ => Ok(0),
+        },
+    )
+    .unwrap_or(0)
 }

@@ -5,6 +5,14 @@ pub fn host_matches_cookie_domain(host: &str, cookie_domain: &str) -> bool {
     normalized_host == domain_lower || normalized_host.ends_with(&format!(".{domain_lower}"))
 }
 
+pub(crate) fn host_matches_cookie_scope(host: &str, domain: &str, host_only: bool) -> bool {
+    if host_only {
+        host.eq_ignore_ascii_case(domain.trim_start_matches('.'))
+    } else {
+        host_matches_cookie_domain(host, domain)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

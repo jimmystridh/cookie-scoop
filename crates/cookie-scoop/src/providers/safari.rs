@@ -4,7 +4,7 @@ use crate::types::GetCookiesResult;
 #[cfg(any(target_os = "macos", test))]
 use crate::types::{BrowserName, Cookie, CookieSource};
 #[cfg(target_os = "macos")]
-use crate::util::host_match::host_matches_cookie_domain;
+use crate::util::host_match::host_matches_cookie_scope;
 #[cfg(any(target_os = "macos", test))]
 use url::Url;
 
@@ -79,7 +79,10 @@ pub async fn get_cookies_from_safari(
                 Some(d) => d,
                 None => continue,
             };
-            if !hosts.iter().any(|h| host_matches_cookie_domain(h, domain)) {
+            if !hosts
+                .iter()
+                .any(|h| host_matches_cookie_scope(h, domain, cookie.host_only == Some(true)))
+            {
                 continue;
             }
             if !options.include_expired.unwrap_or(false) {
@@ -233,10 +236,15 @@ fn decode_cookie(buf: &[u8]) -> Option<Cookie> {
         None
     };
 
-    let mut cookie = Cookie {
+    Some(Cookie {
         name,
         value,
-        domain: domain.map(|d| d.to_string()),
+        domain,
+        host_only: Some(
+            raw_url
+                .as_deref()
+                .is_none_or(|raw| !raw.trim().starts_with('.')),
+        ),
         path: Some(cookie_path),
         url: None,
         expires,
@@ -249,14 +257,7 @@ fn decode_cookie(buf: &[u8]) -> Option<Cookie> {
             origin: None,
             store_id: None,
         }),
-    };
-
-    // Safari doesn't have the domain field if we couldn't parse URL
-    if cookie.domain.is_none() {
-        cookie.domain = None;
-    }
-
-    Some(cookie)
+    })
 }
 
 #[cfg(any(target_os = "macos", test))]

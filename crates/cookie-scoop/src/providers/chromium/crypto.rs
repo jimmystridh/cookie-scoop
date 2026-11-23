@@ -1,8 +1,26 @@
-use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
+use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use pbkdf2::pbkdf2_hmac;
 use sha1::Sha1;
+use sha2::{Digest, Sha256};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecryptError {
+    InvalidCiphertext,
+    HostBinding,
+}
+
+impl std::fmt::Display for DecryptError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidCiphertext => "Invalid Chromium cookie ciphertext",
+            Self::HostBinding => "Chromium cookie host binding verification failed",
+        })
+    }
+}
+
+impl std::error::Error for DecryptError {}
 
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 
@@ -15,122 +33,77 @@ pub fn derive_aes128_cbc_key(password: &str, iterations: u32) -> Vec<u8> {
 pub fn decrypt_chromium_aes128_cbc(
     encrypted_value: &[u8],
     key_candidates: &[Vec<u8>],
-    strip_hash_prefix: bool,
+    expected_host: Option<&str>,
     treat_unknown_prefix_as_plaintext: bool,
-) -> Option<String> {
-    if encrypted_value.len() < 3 {
-        return None;
-    }
-
-    let prefix = &encrypted_value[..3];
-    let has_version_prefix = prefix.len() == 3
-        && prefix[0] == b'v'
-        && prefix[1].is_ascii_digit()
-        && prefix[2].is_ascii_digit();
-
-    if !has_version_prefix {
-        if !treat_unknown_prefix_as_plaintext {
-            return None;
+) -> Result<String, DecryptError> {
+    let prefix = encrypted_value
+        .get(..3)
+        .ok_or(DecryptError::InvalidCiphertext)?;
+    if !is_version_prefix(prefix) {
+        if treat_unknown_prefix_as_plaintext {
+            return decode_cookie_value_bytes(encrypted_value, expected_host);
         }
-        return decode_cookie_value_bytes(encrypted_value, false);
+        return Err(DecryptError::InvalidCiphertext);
     }
 
     let ciphertext = &encrypted_value[3..];
-    if ciphertext.is_empty() {
-        return Some(String::new());
-    }
-
+    let mut failure = DecryptError::InvalidCiphertext;
     for key in key_candidates {
-        if let Some(decrypted) = try_decrypt_aes128_cbc(ciphertext, key) {
-            if let Some(decoded) = decode_cookie_value_bytes(&decrypted, strip_hash_prefix) {
-                return Some(decoded);
-            }
+        let iv = [0x20; 16];
+        let mut buffer = ciphertext.to_vec();
+        let Some(plaintext) = Aes128CbcDec::new_from_slices(key, &iv)
+            .ok()
+            .and_then(|decoder| decoder.decrypt_padded_mut::<Pkcs7>(&mut buffer).ok())
+        else {
+            continue;
+        };
+        match decode_cookie_value_bytes(plaintext, expected_host) {
+            Ok(value) => return Ok(value),
+            Err(DecryptError::HostBinding) => failure = DecryptError::HostBinding,
+            Err(DecryptError::InvalidCiphertext) => {}
         }
     }
-
-    None
+    Err(failure)
 }
 
 pub fn decrypt_chromium_aes256_gcm(
     encrypted_value: &[u8],
     key: &[u8],
-    strip_hash_prefix: bool,
-) -> Option<String> {
-    if encrypted_value.len() < 3 {
-        return None;
+    expected_host: Option<&str>,
+) -> Result<String, DecryptError> {
+    let prefix = encrypted_value
+        .get(..3)
+        .ok_or(DecryptError::InvalidCiphertext)?;
+    if !is_version_prefix(prefix) {
+        return Err(DecryptError::InvalidCiphertext);
     }
-
-    let prefix = &encrypted_value[..3];
-    let has_version_prefix =
-        prefix[0] == b'v' && prefix[1].is_ascii_digit() && prefix[2].is_ascii_digit();
-
-    if !has_version_prefix {
-        return None;
-    }
-
     let payload = &encrypted_value[3..];
-    // 12 byte nonce + at least 16 byte tag
-    if payload.len() < 28 {
-        return None;
-    }
-
-    let nonce_bytes = &payload[..12];
-    let auth_tag = &payload[payload.len() - 16..];
-    let ciphertext = &payload[12..payload.len() - 16];
-
-    // Combine ciphertext + auth tag as aes-gcm expects
-    let mut combined = Vec::with_capacity(ciphertext.len() + auth_tag.len());
-    combined.extend_from_slice(ciphertext);
-    combined.extend_from_slice(auth_tag);
-
-    let cipher = Aes256Gcm::new_from_slice(key).ok()?;
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let plaintext = cipher.decrypt(nonce, combined.as_ref()).ok()?;
-
-    decode_cookie_value_bytes(&plaintext, strip_hash_prefix)
+    let nonce = payload.get(..12).ok_or(DecryptError::InvalidCiphertext)?;
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| DecryptError::InvalidCiphertext)?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(nonce), &payload[12..])
+        .map_err(|_| DecryptError::InvalidCiphertext)?;
+    decode_cookie_value_bytes(&plaintext, expected_host)
 }
 
-fn try_decrypt_aes128_cbc(ciphertext: &[u8], key: &[u8]) -> Option<Vec<u8>> {
-    // Chromium's legacy AES-128-CBC uses an IV of 16 spaces (0x20)
-    let iv = [0x20u8; 16];
-
-    // ciphertext must be a multiple of 16
-    if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
-        return None;
-    }
-
-    let mut buf = ciphertext.to_vec();
-    let decryptor = Aes128CbcDec::new_from_slices(key, &iv).ok()?;
-    decryptor.decrypt_padded_mut::<NoPadding>(&mut buf).ok()?;
-
-    Some(remove_pkcs7_padding(&buf))
+fn is_version_prefix(prefix: &[u8]) -> bool {
+    prefix[0] == b'v' && prefix[1].is_ascii_digit() && prefix[2].is_ascii_digit()
 }
 
-fn remove_pkcs7_padding(value: &[u8]) -> Vec<u8> {
-    if value.is_empty() {
-        return value.to_vec();
-    }
-    let padding = value[value.len() - 1] as usize;
-    if padding == 0 || padding > 16 || padding > value.len() {
-        return value.to_vec();
-    }
-    // Verify padding bytes are all the same
-    let start = value.len() - padding;
-    if value[start..].iter().all(|&b| b as usize == padding) {
-        value[..start].to_vec()
-    } else {
-        value.to_vec()
-    }
-}
-
-fn decode_cookie_value_bytes(value: &[u8], strip_hash_prefix: bool) -> Option<String> {
-    let bytes = if strip_hash_prefix && value.len() >= 32 {
-        &value[32..]
+fn decode_cookie_value_bytes(
+    value: &[u8],
+    expected_host: Option<&str>,
+) -> Result<String, DecryptError> {
+    let bytes = if let Some(host) = expected_host {
+        let digest = Sha256::digest(host.as_bytes());
+        value
+            .strip_prefix(&digest[..])
+            .ok_or(DecryptError::HostBinding)?
     } else {
         value
     };
-    let s = std::str::from_utf8(bytes).ok()?;
-    Some(strip_leading_control_chars(s))
+    let decoded = std::str::from_utf8(bytes).map_err(|_| DecryptError::InvalidCiphertext)?;
+    Ok(strip_leading_control_chars(decoded))
 }
 
 fn strip_leading_control_chars(value: &str) -> String {
@@ -176,8 +149,8 @@ mod tests {
         let mut encrypted = b"v10".to_vec();
         encrypted.extend_from_slice(&ciphertext);
 
-        let result = decrypt_chromium_aes128_cbc(&encrypted, &[key], false, false);
-        assert_eq!(result, Some("hello_cookie_value".to_string()));
+        let result = decrypt_chromium_aes128_cbc(&encrypted, &[key], None, false);
+        assert_eq!(result, Ok("hello_cookie_value".to_string()));
     }
 
     #[test]
@@ -196,29 +169,39 @@ mod tests {
         // ciphertext_with_tag already has tag appended
         encrypted.extend_from_slice(&ciphertext_with_tag);
 
-        let result = decrypt_chromium_aes256_gcm(&encrypted, &key_bytes, false);
-        assert_eq!(result, Some("gcm_cookie_value".to_string()));
+        let result = decrypt_chromium_aes256_gcm(&encrypted, &key_bytes, None);
+        assert_eq!(result, Ok("gcm_cookie_value".to_string()));
     }
 
     #[test]
     fn test_unknown_prefix_as_plaintext() {
         let data = b"plain_cookie_value";
-        let result = decrypt_chromium_aes128_cbc(data, &[], false, true);
-        assert_eq!(result, Some("plain_cookie_value".to_string()));
+        let result = decrypt_chromium_aes128_cbc(data, &[], None, true);
+        assert_eq!(result, Ok("plain_cookie_value".to_string()));
     }
 
     #[test]
     fn test_unknown_prefix_strict() {
         let data = b"plain_cookie_value";
-        let result = decrypt_chromium_aes128_cbc(data, &[], false, false);
-        assert!(result.is_none());
+        let result = decrypt_chromium_aes128_cbc(data, &[], None, false);
+        assert_eq!(result, Err(DecryptError::InvalidCiphertext));
     }
 
     #[test]
-    fn test_strip_hash_prefix() {
-        let mut data = vec![0u8; 32]; // 32-byte hash prefix
+    fn verifies_hash_prefix_against_the_raw_host_key() {
+        let mut data = Sha256::digest(b".example.test").to_vec();
         data.extend_from_slice(b"actual_value");
-        let result = decode_cookie_value_bytes(&data, true);
-        assert_eq!(result, Some("actual_value".to_string()));
+        assert_eq!(
+            decode_cookie_value_bytes(&data, Some(".example.test")),
+            Ok("actual_value".to_owned())
+        );
+        assert_eq!(
+            decode_cookie_value_bytes(&data, Some("example.test")),
+            Err(DecryptError::HostBinding)
+        );
+        assert_eq!(
+            decode_cookie_value_bytes(&data[..20], Some(".example.test")),
+            Err(DecryptError::HostBinding)
+        );
     }
 }

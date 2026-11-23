@@ -1,4 +1,7 @@
+use crate::types::ChromiumBrowser;
 use crate::util::exec::exec_capture;
+
+use super::ChromiumTarget;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinuxKeyringBackend {
@@ -8,16 +11,34 @@ pub enum LinuxKeyringBackend {
 }
 
 pub async fn get_linux_chromium_safe_storage_password(
-    app: &str, // "chrome" or "edge"
+    app: &str,
     backend_override: Option<LinuxKeyringBackend>,
 ) -> (String, Vec<String>) {
-    let mut warnings = Vec::new();
+    let target = match app {
+        "edge" => ChromiumTarget::Edge,
+        "chromium" => ChromiumTarget::Chrome(ChromiumBrowser::Chromium),
+        "brave" => ChromiumTarget::Chrome(ChromiumBrowser::Brave),
+        _ => ChromiumTarget::Chrome(ChromiumBrowser::Chrome),
+    };
+    read_linux_safe_storage_password(target, backend_override, None).await
+}
 
-    // Check env override
-    let override_key = if app == "edge" {
-        "SWEET_COOKIE_EDGE_SAFE_STORAGE_PASSWORD"
-    } else {
-        "SWEET_COOKIE_CHROME_SAFE_STORAGE_PASSWORD"
+pub(crate) async fn read_linux_safe_storage_password(
+    target: ChromiumTarget,
+    backend_override: Option<LinuxKeyringBackend>,
+    timeout_ms: Option<u64>,
+) -> (String, Vec<String>) {
+    let mut warnings = Vec::new();
+    let timeout_ms = timeout_ms.unwrap_or(3_000);
+    let (application, override_key) = match target {
+        ChromiumTarget::Edge => ("msedge", "SWEET_COOKIE_EDGE_SAFE_STORAGE_PASSWORD"),
+        ChromiumTarget::Chrome(ChromiumBrowser::Chromium) => {
+            ("chromium", "SWEET_COOKIE_CHROMIUM_SAFE_STORAGE_PASSWORD")
+        }
+        ChromiumTarget::Chrome(ChromiumBrowser::Brave) => {
+            ("brave", "SWEET_COOKIE_BRAVE_SAFE_STORAGE_PASSWORD")
+        }
+        _ => ("chrome", "SWEET_COOKIE_CHROME_SAFE_STORAGE_PASSWORD"),
     };
 
     if let Ok(val) = std::env::var(override_key) {
@@ -35,24 +56,15 @@ pub async fn get_linux_chromium_safe_storage_password(
         return (String::new(), warnings);
     }
 
-    let (service, account, folder) = if app == "edge" {
-        (
-            "Microsoft Edge Safe Storage",
-            "Microsoft Edge",
-            "Microsoft Edge Keys",
-        )
-    } else {
-        ("Chrome Safe Storage", "Chrome", "Chrome Keys")
-    };
+    let account = target.label();
+    let service = format!("{account} Safe Storage");
+    let folder = format!("{account} Keys");
 
     if backend == LinuxKeyringBackend::Gnome {
-        // Try the new v2 schema first (application attribute), then fall back to old schema.
-        // Modern Chrome versions store Safe Storage under `application=chrome`.
-        let application_attr = if app == "edge" { "msedge" } else { "chrome" };
         let res = exec_capture(
             "secret-tool",
-            &["lookup", "application", application_attr],
-            Some(3_000),
+            &["lookup", "application", application],
+            Some(timeout_ms),
         )
         .await;
         if res.code == 0 && !res.stdout.trim().is_empty() {
@@ -61,8 +73,8 @@ pub async fn get_linux_chromium_safe_storage_password(
         // Fall back to old schema (service/account)
         let res = exec_capture(
             "secret-tool",
-            &["lookup", "service", service, "account", account],
-            Some(3_000),
+            &["lookup", "service", &service, "account", account],
+            Some(timeout_ms),
         )
         .await;
         if res.code == 0 {
@@ -87,11 +99,11 @@ pub async fn get_linux_chromium_safe_storage_password(
         _ => ("org.kde.kwalletd", "/modules/kwalletd"),
     };
 
-    let wallet = get_kwallet_network_wallet(service_name, wallet_path).await;
+    let wallet = get_kwallet_network_wallet(service_name, wallet_path, timeout_ms).await;
     let password_res = exec_capture(
         "kwallet-query",
-        &["--read-password", service, "--folder", folder, &wallet],
-        Some(3_000),
+        &["--read-password", &service, "--folder", &folder, &wallet],
+        Some(timeout_ms),
     )
     .await;
 
@@ -140,7 +152,11 @@ fn choose_linux_keyring_backend() -> LinuxKeyringBackend {
     }
 }
 
-async fn get_kwallet_network_wallet(service_name: &str, wallet_path: &str) -> String {
+async fn get_kwallet_network_wallet(
+    service_name: &str,
+    wallet_path: &str,
+    timeout_ms: u64,
+) -> String {
     let dest = format!("--dest={service_name}");
     let res = exec_capture(
         "dbus-send",
@@ -151,7 +167,7 @@ async fn get_kwallet_network_wallet(service_name: &str, wallet_path: &str) -> St
             wallet_path,
             "org.kde.KWallet.networkWallet",
         ],
-        Some(3_000),
+        Some(timeout_ms),
     )
     .await;
 

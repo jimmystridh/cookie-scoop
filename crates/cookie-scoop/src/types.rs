@@ -33,6 +33,21 @@ impl std::fmt::Display for BrowserName {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromiumBrowser {
+    Chrome,
+    Chromium,
+    Brave,
+    Arc,
+    Dia,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileSelection {
+    Selected(Vec<String>),
+    All,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CookieSameSite {
     Strict,
@@ -64,6 +79,8 @@ pub struct Cookie {
     pub value: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
+    #[serde(rename = "hostOnly", skip_serializing_if = "Option::is_none")]
+    pub host_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,6 +108,11 @@ pub struct GetCookiesOptions {
     pub edge_profile: Option<String>,
     pub firefox_profile: Option<String>,
     pub safari_cookies_file: Option<String>,
+    pub chrome_profiles: Option<ProfileSelection>,
+    pub edge_profiles: Option<ProfileSelection>,
+    pub firefox_profiles: Option<ProfileSelection>,
+    pub safari_cookies_files: Option<Vec<String>>,
+    pub chromium_browser: Option<ChromiumBrowser>,
     pub include_expired: Option<bool>,
     pub timeout_ms: Option<u64>,
     pub debug: Option<bool>,
@@ -112,6 +134,11 @@ impl GetCookiesOptions {
             edge_profile: None,
             firefox_profile: None,
             safari_cookies_file: None,
+            chrome_profiles: None,
+            edge_profiles: None,
+            firefox_profiles: None,
+            safari_cookies_files: None,
+            chromium_browser: None,
             include_expired: None,
             timeout_ms: None,
             debug: None,
@@ -154,6 +181,31 @@ impl GetCookiesOptions {
 
     pub fn safari_cookies_file(mut self, file: impl Into<String>) -> Self {
         self.safari_cookies_file = Some(file.into());
+        self
+    }
+
+    pub fn chrome_profiles(mut self, profiles: ProfileSelection) -> Self {
+        self.chrome_profiles = Some(profiles);
+        self
+    }
+
+    pub fn edge_profiles(mut self, profiles: ProfileSelection) -> Self {
+        self.edge_profiles = Some(profiles);
+        self
+    }
+
+    pub fn firefox_profiles(mut self, profiles: ProfileSelection) -> Self {
+        self.firefox_profiles = Some(profiles);
+        self
+    }
+
+    pub fn safari_cookies_files(mut self, files: Vec<String>) -> Self {
+        self.safari_cookies_files = Some(files);
+        self
+    }
+
+    pub fn chromium_browser(mut self, browser: ChromiumBrowser) -> Self {
+        self.chromium_browser = Some(browser);
         self
     }
 
@@ -233,17 +285,27 @@ pub(crate) fn normalize_names(names: &Option<Vec<String>>) -> Option<HashSet<Str
     Some(cleaned)
 }
 
+pub(crate) type CookieKey = (String, String, bool, String);
+
+pub(crate) fn cookie_key(cookie: &Cookie) -> CookieKey {
+    (
+        cookie.name.clone(),
+        cookie
+            .domain
+            .as_deref()
+            .unwrap_or("")
+            .trim_start_matches('.')
+            .to_ascii_lowercase(),
+        cookie.host_only == Some(true),
+        cookie.path.as_deref().unwrap_or("/").to_owned(),
+    )
+}
+
 pub(crate) fn dedupe_cookies(cookies: Vec<Cookie>) -> Vec<Cookie> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for cookie in cookies {
-        let key = format!(
-            "{}|{}|{}",
-            cookie.name,
-            cookie.domain.as_deref().unwrap_or(""),
-            cookie.path.as_deref().unwrap_or("")
-        );
-        if seen.insert(key) {
+        if seen.insert(cookie_key(&cookie)) {
             result.push(cookie);
         }
     }

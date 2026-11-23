@@ -5,9 +5,8 @@ Last synced commits from upstream projects that this Rust port is based on.
 ## @steipete/sweet-cookie (TypeScript)
 
 - Repo: https://github.com/steipete/sweet-cookie
-- Commit: `b32ec1a207938c18ed1239ea48bf107de56db8f8`
-- Subject: docs: add releasing checklist
-- Includes: PR #18 (GNOME keyring v2 schema fix)
+- Commit: [`68fad3c`](https://github.com/steipete/sweet-cookie/commit/68fad3c1c7e92dc136a5a851c0bfb0d54bebcd1c)
+- Includes v0.4.5 and the large-origin-list SQLite fix from PR #74. See [CHANGELOG.md](CHANGELOG.md) for the changes ported to Rust.
 
 ## SweetCookieKit (Swift)
 

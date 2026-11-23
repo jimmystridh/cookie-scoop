@@ -1,11 +1,10 @@
-use url::Url;
+use url::{Origin, Url};
 
 pub fn normalize_origins(url_str: &str, extra_origins: Option<&[String]>) -> Vec<String> {
     let mut origins = Vec::new();
 
-    if let Ok(parsed) = Url::parse(url_str) {
-        let origin = parsed.origin().unicode_serialization();
-        origins.push(ensure_trailing_slash(&origin));
+    if let Some(origin) = parse_origin(url_str) {
+        origins.push(origin);
     }
 
     if let Some(extras) = extra_origins {
@@ -14,9 +13,8 @@ pub fn normalize_origins(url_str: &str, extra_origins: Option<&[String]>) -> Vec
             if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(parsed) = Url::parse(trimmed) {
-                let origin = parsed.origin().unicode_serialization();
-                origins.push(ensure_trailing_slash(&origin));
+            if let Some(origin) = parse_origin(trimmed) {
+                origins.push(origin);
             }
         }
     }
@@ -27,12 +25,9 @@ pub fn normalize_origins(url_str: &str, extra_origins: Option<&[String]>) -> Vec
     origins
 }
 
-fn ensure_trailing_slash(origin: &str) -> String {
-    if origin.ends_with('/') {
-        origin.to_string()
-    } else {
-        format!("{origin}/")
-    }
+fn parse_origin(input: &str) -> Option<String> {
+    let origin = Url::parse(input).ok()?.origin();
+    matches!(origin, Origin::Tuple(..)).then(|| format!("{}/", origin.ascii_serialization()))
 }
 
 pub fn extract_host(origin: &str) -> Option<String> {

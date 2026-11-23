@@ -1,7 +1,29 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use cookie_scoop::{
-    BrowserName, CookieHeaderOptions, CookieHeaderSort, CookieMode, GetCookiesOptions,
+    BrowserName, ChromiumBrowser, CookieHeaderOptions, CookieHeaderSort, CookieMode,
+    GetCookiesOptions, ProfileSelection,
 };
+
+#[derive(Clone, ValueEnum)]
+enum ChromiumTarget {
+    Chrome,
+    Chromium,
+    Brave,
+    Arc,
+    Dia,
+}
+
+impl From<ChromiumTarget> for ChromiumBrowser {
+    fn from(target: ChromiumTarget) -> Self {
+        match target {
+            ChromiumTarget::Chrome => Self::Chrome,
+            ChromiumTarget::Chromium => Self::Chromium,
+            ChromiumTarget::Brave => Self::Brave,
+            ChromiumTarget::Arc => Self::Arc,
+            ChromiumTarget::Dia => Self::Dia,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -25,21 +47,29 @@ struct Cli {
     #[arg(long)]
     header: bool,
 
-    /// Chrome profile name or path
+    /// Chrome profile name or path. Repeat to read multiple profiles
     #[arg(long)]
-    chrome_profile: Option<String>,
+    chrome_profile: Vec<String>,
 
-    /// Edge profile name or path
+    /// Edge profile name or path. Repeat to read multiple profiles
     #[arg(long)]
-    edge_profile: Option<String>,
+    edge_profile: Vec<String>,
 
-    /// Firefox profile name or path
+    /// Firefox profile name or path. Repeat to read multiple profiles
     #[arg(long)]
-    firefox_profile: Option<String>,
+    firefox_profile: Vec<String>,
 
-    /// Safari cookies file path
+    /// Read all discovered profiles for selected Chrome, Edge, and Firefox backends
+    #[arg(long, conflicts_with_all = ["chrome_profile", "edge_profile", "firefox_profile"])]
+    all_profiles: bool,
+
+    /// Browser targeted by the Chrome backend (Arc and Dia are macOS-only)
+    #[arg(long, value_enum)]
+    chromium_browser: Option<ChromiumTarget>,
+
+    /// Safari cookies file path. Repeat to read multiple files
     #[arg(long)]
-    safari_cookies_file: Option<String>,
+    safari_cookies_file: Vec<String>,
 
     /// Allowlist of cookie names (comma-separated)
     #[arg(long, value_delimiter = ',')]
@@ -104,17 +134,20 @@ async fn main() {
     if let Some(m) = mode {
         options = options.mode(m);
     }
-    if let Some(ref p) = cli.chrome_profile {
-        options = options.chrome_profile(p);
+    if let Some(profiles) = cli_profiles(cli.all_profiles, cli.chrome_profile) {
+        options = options.chrome_profiles(profiles);
     }
-    if let Some(ref p) = cli.edge_profile {
-        options = options.edge_profile(p);
+    if let Some(profiles) = cli_profiles(cli.all_profiles, cli.edge_profile) {
+        options = options.edge_profiles(profiles);
     }
-    if let Some(ref p) = cli.firefox_profile {
-        options = options.firefox_profile(p);
+    if let Some(profiles) = cli_profiles(cli.all_profiles, cli.firefox_profile) {
+        options = options.firefox_profiles(profiles);
     }
-    if let Some(ref f) = cli.safari_cookies_file {
-        options = options.safari_cookies_file(f);
+    if let Some(browser) = cli.chromium_browser {
+        options = options.chromium_browser(browser.into());
+    }
+    if !cli.safari_cookies_file.is_empty() {
+        options = options.safari_cookies_files(cli.safari_cookies_file);
     }
     if let Some(ref n) = cli.names {
         options = options.names(n.clone());
@@ -170,5 +203,15 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+    }
+}
+
+fn cli_profiles(all: bool, names: Vec<String>) -> Option<ProfileSelection> {
+    if all {
+        Some(ProfileSelection::All)
+    } else if names.is_empty() {
+        None
+    } else {
+        Some(ProfileSelection::Selected(names))
     }
 }

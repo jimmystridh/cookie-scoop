@@ -2,7 +2,9 @@ use std::collections::HashSet;
 
 use crate::types::{Cookie, GetCookiesResult};
 use crate::util::base64::try_decode_base64_json;
-use crate::util::host_match::host_matches_cookie_domain;
+use crate::util::host_match::host_matches_cookie_scope;
+use crate::util::origins::extract_host;
+use serde_json::Value;
 use url::Url;
 
 pub struct InlineSource {
@@ -15,8 +17,14 @@ pub async fn get_cookies_from_inline(
     origins: &[String],
     allowlist_names: Option<&HashSet<String>>,
 ) -> GetCookiesResult {
-    let warnings = Vec::new();
+    read_inline(inline, origins, allowlist_names).await.0
+}
 
+pub(crate) async fn read_inline(
+    inline: &InlineSource,
+    origins: &[String],
+    allowlist_names: Option<&HashSet<String>>,
+) -> (GetCookiesResult, bool) {
     let raw_payload = if inline.source.ends_with("file")
         || inline.payload.ends_with(".json")
         || inline.payload.ends_with(".base64")
@@ -33,32 +41,52 @@ pub async fn get_cookies_from_inline(
     let parsed = match try_parse_cookie_payload(&decoded) {
         Some(cookies) => cookies,
         None => {
-            return GetCookiesResult {
-                cookies: vec![],
-                warnings,
-            }
+            return (
+                GetCookiesResult {
+                    cookies: vec![],
+                    warnings: vec![],
+                },
+                false,
+            );
         }
     };
 
     let host_allow: HashSet<String> = origins
         .iter()
-        .filter_map(|o| {
-            Url::parse(o)
-                .ok()
-                .and_then(|u| u.host_str().map(|h| h.to_string()))
-        })
+        .filter_map(|origin| extract_host(origin))
         .collect();
+    if host_allow.is_empty() {
+        return (
+            GetCookiesResult {
+                cookies: vec![],
+                warnings: vec![],
+            },
+            false,
+        );
+    }
 
     let mut cookies = Vec::new();
-    for cookie in parsed {
-        if cookie.name.is_empty() {
+    let mut isolated = 0;
+    for record in parsed {
+        let Some(name) = record
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+        else {
             continue;
-        }
+        };
         if let Some(names) = allowlist_names {
-            if !names.is_empty() && !names.contains(&cookie.name) {
+            if !names.is_empty() && !names.contains(name) {
                 continue;
             }
         }
+        if has_unsupported_isolation(&record) {
+            isolated += 1;
+            continue;
+        }
+        let Ok(cookie) = serde_json::from_value::<Cookie>(record) else {
+            continue;
+        };
         let domain = cookie.domain.as_deref().map(|d| d.to_string()).or_else(|| {
             cookie
                 .url
@@ -67,40 +95,49 @@ pub async fn get_cookies_from_inline(
                 .and_then(|u| u.host_str().map(|h| h.to_string()))
         });
         if let Some(ref domain) = domain {
-            if !host_allow.is_empty() && !matches_any_host(&host_allow, domain) {
+            if !host_allow
+                .iter()
+                .any(|host| host_matches_cookie_scope(host, domain, cookie.host_only == Some(true)))
+            {
                 continue;
             }
         }
         cookies.push(cookie);
     }
 
-    GetCookiesResult { cookies, warnings }
+    let warnings = if isolated == 0 {
+        vec![]
+    } else {
+        vec![format!("{isolated} inline cookie(s) with partition or container provenance were excluded because replay cannot preserve their isolation context.")]
+    };
+    (GetCookiesResult { cookies, warnings }, isolated != 0)
 }
 
-fn try_parse_cookie_payload(input: &str) -> Option<Vec<Cookie>> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
+fn try_parse_cookie_payload(input: &str) -> Option<Vec<Value>> {
+    match serde_json::from_str(input).ok()? {
+        Value::Array(records) => Some(records),
+        Value::Object(mut object) => match object.remove("cookies")? {
+            Value::Array(records) => Some(records),
+            _ => None,
+        },
+        _ => None,
     }
-    // Try as array
-    if let Ok(cookies) = serde_json::from_str::<Vec<Cookie>>(trimmed) {
-        return Some(cookies);
-    }
-    // Try as { cookies: [...] }
-    #[derive(serde::Deserialize)]
-    struct Wrapped {
-        cookies: Vec<Cookie>,
-    }
-    if let Ok(wrapped) = serde_json::from_str::<Wrapped>(trimmed) {
-        return Some(wrapped.cookies);
-    }
-    None
 }
 
-fn matches_any_host(hosts: &HashSet<String>, cookie_domain: &str) -> bool {
-    hosts
-        .iter()
-        .any(|host| host_matches_cookie_domain(host, cookie_domain))
+fn has_unsupported_isolation(record: &Value) -> bool {
+    record
+        .get("partitionKey")
+        .is_some_and(|value| !value.is_null())
+        || record["partitionKeyOpaque"] == true
+        || ["top_frame_site_key", "originAttributes"]
+            .iter()
+            .any(|field| {
+                record[*field]
+                    .as_str()
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+        || [Value::from(true), Value::from(1), Value::from("1")]
+            .contains(&record["isPartitionedAttributeSet"])
 }
 
 #[cfg(test)]

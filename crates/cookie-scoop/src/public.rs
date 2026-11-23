@@ -1,13 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::providers::chrome::{get_cookies_from_chrome, ChromeOptions};
 use crate::providers::edge::{get_cookies_from_edge, EdgeOptions};
 use crate::providers::firefox::{get_cookies_from_firefox, FirefoxOptions};
-use crate::providers::inline::{get_cookies_from_inline, InlineSource};
+use crate::providers::inline::{read_inline, InlineSource};
 use crate::providers::safari::{get_cookies_from_safari, SafariOptions};
 use crate::types::{
-    normalize_names, BrowserName, Cookie, CookieHeaderOptions, CookieHeaderSort, CookieMode,
-    GetCookiesOptions, GetCookiesResult,
+    cookie_key, dedupe_cookies, normalize_names, BrowserName, Cookie, CookieHeaderOptions,
+    CookieHeaderSort, CookieMode, GetCookiesOptions, GetCookiesResult,
 };
 use crate::util::origins::normalize_origins;
 
@@ -20,6 +20,12 @@ const DEFAULT_BROWSERS: &[BrowserName] = &[
 pub async fn get_cookies(options: GetCookiesOptions) -> GetCookiesResult {
     let mut warnings: Vec<String> = Vec::new();
     let origins = normalize_origins(&options.url, options.origins.as_deref());
+    if origins.is_empty() {
+        return GetCookiesResult {
+            cookies: vec![],
+            warnings,
+        };
+    }
     let names = normalize_names(&options.names);
 
     let browsers = if let Some(ref b) = options.browsers {
@@ -39,8 +45,11 @@ pub async fn get_cookies(options: GetCookiesOptions) -> GetCookiesResult {
 
     // Inline sources first
     let inline_sources = resolve_inline_sources(&options);
+    let mut excluded_inline_isolation = false;
     for source in &inline_sources {
-        let inline_result = get_cookies_from_inline(source, &origins, names.as_ref()).await;
+        let (inline_result, excluded_isolation) =
+            read_inline(source, &origins, names.as_ref()).await;
+        excluded_inline_isolation |= excluded_isolation;
         warnings.extend(inline_result.warnings);
         if !inline_result.cookies.is_empty() {
             return GetCookiesResult {
@@ -49,8 +58,15 @@ pub async fn get_cookies(options: GetCookiesOptions) -> GetCookiesResult {
             };
         }
     }
+    if excluded_inline_isolation {
+        return GetCookiesResult {
+            cookies: vec![],
+            warnings,
+        };
+    }
 
-    let mut merged: HashMap<String, Cookie> = HashMap::new();
+    let mut merged = Vec::new();
+    let mut earlier_browser_keys = HashSet::new();
 
     for browser in &browsers {
         let result = match browser {
@@ -63,6 +79,8 @@ pub async fn get_cookies(options: GetCookiesOptions) -> GetCookiesResult {
 
                 let chrome_options = ChromeOptions {
                     profile: chrome_profile,
+                    profiles: options.chrome_profiles.clone(),
+                    chromium_browser: options.chromium_browser,
                     timeout_ms: options.timeout_ms,
                     include_expired: options.include_expired,
                     debug: options.debug,
@@ -79,6 +97,7 @@ pub async fn get_cookies(options: GetCookiesOptions) -> GetCookiesResult {
 
                 let edge_options = EdgeOptions {
                     profile: edge_profile,
+                    profiles: options.edge_profiles.clone(),
                     timeout_ms: options.timeout_ms,
                     include_expired: options.include_expired,
                     debug: options.debug,
@@ -93,16 +112,29 @@ pub async fn get_cookies(options: GetCookiesOptions) -> GetCookiesResult {
 
                 let firefox_options = FirefoxOptions {
                     profile: firefox_profile,
+                    profiles: options.firefox_profiles.clone(),
                     include_expired: options.include_expired,
                 };
                 get_cookies_from_firefox(firefox_options, &origins, names.as_ref()).await
             }
             BrowserName::Safari => {
-                let safari_options = SafariOptions {
-                    include_expired: options.include_expired,
-                    file: options.safari_cookies_file.clone(),
+                let files = safari_file_selectors(&options);
+                let mut safari = GetCookiesResult {
+                    cookies: vec![],
+                    warnings: vec![],
                 };
-                get_cookies_from_safari(safari_options, &origins, names.as_ref()).await
+                for file in files {
+                    let safari_options = SafariOptions {
+                        include_expired: options.include_expired,
+                        file,
+                    };
+                    let result =
+                        get_cookies_from_safari(safari_options, &origins, names.as_ref()).await;
+                    safari.cookies.extend(result.cookies);
+                    safari.warnings.extend(result.warnings);
+                }
+                safari.cookies = dedupe_cookies(safari.cookies);
+                safari
             }
         };
 
@@ -115,18 +147,36 @@ pub async fn get_cookies(options: GetCookiesOptions) -> GetCookiesResult {
             };
         }
 
+        let mut browser_keys = HashSet::new();
         for cookie in result.cookies {
-            let domain = cookie.domain.as_deref().unwrap_or("");
-            let path = cookie.path.as_deref().unwrap_or("");
-            let key = format!("{}|{}|{}", cookie.name, domain, path);
-            merged.entry(key).or_insert(cookie);
+            let key = cookie_key(&cookie);
+            if !earlier_browser_keys.contains(&key) {
+                browser_keys.insert(key);
+                merged.push(cookie);
+            }
         }
+        earlier_browser_keys.extend(browser_keys);
     }
 
     GetCookiesResult {
-        cookies: merged.into_values().collect(),
+        cookies: merged,
         warnings,
     }
+}
+
+fn safari_file_selectors(options: &GetCookiesOptions) -> Vec<Option<String>> {
+    if let Some(files) = &options.safari_cookies_files {
+        let files: Vec<_> = files
+            .iter()
+            .map(|file| file.trim())
+            .filter(|file| !file.is_empty())
+            .map(|file| Some(file.to_owned()))
+            .collect();
+        if !files.is_empty() {
+            return files;
+        }
+    }
+    vec![options.safari_cookies_file.clone()]
 }
 
 pub fn to_cookie_header(cookies: &[Cookie], options: &CookieHeaderOptions) -> String {
